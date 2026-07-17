@@ -1,12 +1,40 @@
-const CACHE='sarmart-v84';
-const ASSETS=['./','./index.html','./styles.css','./app.js','./manifest.webmanifest','./sarmart-logo.svg'];
-self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting())));
-self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
-self.addEventListener('fetch',event=>{
+const CACHE_NAME = 'sarmart-cache';
+
+self.addEventListener('install', () => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(key => caches.delete(key)));
+      await self.clients.claim();
+    })()
+  );
+});
+
+self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-  event.respondWith(fetch(event.request).then(response=>{
-    const copy=response.clone();
-    if (event.request.url.startsWith(self.location.origin)) caches.open(CACHE).then(cache=>cache.put(event.request,copy));
-    return response;
-  }).catch(()=>caches.match(event.request)));
+
+  event.respondWith(
+    (async () => {
+      try {
+        // Always try the network first.
+        const response = await fetch(event.request);
+
+        // Save a copy for offline use.
+        if (event.request.url.startsWith(self.location.origin)) {
+          const cache = await caches.open(CACHE_NAME);
+          cache.put(event.request, response.clone());
+        }
+
+        return response;
+      } catch (err) {
+        // If offline, use the cached copy.
+        const cached = await caches.match(event.request);
+        return cached || Response.error();
+      }
+    })()
+  );
 });
