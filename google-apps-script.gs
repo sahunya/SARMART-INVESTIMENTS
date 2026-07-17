@@ -15,11 +15,13 @@ const STOCK_SHEET = 'Out of stock';
 const HEADERS = ['id', 'type', 'name', 'category', 'party', 'amount', 'paidAmount', 'payments', 'status', 'date', 'time', 'due', 'notes', 'noteEntries', 'enteredBy', 'color', 'createdAt'];
 const CONTACT_HEADERS = ['id', 'name', 'type', 'phone', 'email', 'createdAt'];
 const STOCK_HEADERS = ['id', 'name', 'date', 'replaced', 'replacedDate', 'createdAt'];
+const SESSION_VERSION_KEY = 'sarmart_session_version';
 
 function doGet(e) {
   if ((e.parameter || {}).token !== API_TOKEN) return output_({ ok: false, error: 'Unauthorized' });
   if (e.parameter.action === 'listContacts') return output_({ ok: true, data: listContacts_() });
   if (e.parameter.action === 'listStock') return output_({ ok: true, data: listStock_() });
+  if (e.parameter.action === 'getSessionVersion') return output_({ ok: true, data: { version: sessionVersion_() } });
   return output_({ ok: true, data: listRecords_() });
 }
 
@@ -37,11 +39,28 @@ function doPost(e) {
   if (body.action === 'createContact') return output_({ ok: true, data: createContact_(body.contact) });
   if (body.action === 'createStock') return output_({ ok: true, data: createStock_(body.item) });
   if (body.action === 'updateStock') return output_({ ok: true, data: updateStock_(body.item) });
+  if (body.action === 'logoutOtherDevices') return output_({ ok: true, data: rotateSessionVersion_() });
   return output_({ ok: false, error: 'Unknown action' });
 }
 
 function output_(data) {
   return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function sessionVersion_() {
+  return PropertiesService.getScriptProperties().getProperty(SESSION_VERSION_KEY) || '1';
+}
+
+function rotateSessionVersion_() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const version = String(Date.now());
+    PropertiesService.getScriptProperties().setProperty(SESSION_VERSION_KEY, version);
+    return { version: version };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function sheet_() {
