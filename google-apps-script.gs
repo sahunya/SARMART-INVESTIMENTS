@@ -14,7 +14,7 @@ const CONTACTS_SHEET = 'Contacts';
 const STOCK_SHEET = 'Out of stock';
 const HEADERS = ['id', 'type', 'name', 'category', 'party', 'amount', 'paidAmount', 'payments', 'status', 'date', 'time', 'due', 'notes', 'noteEntries', 'enteredBy', 'color', 'createdAt'];
 const CONTACT_HEADERS = ['id', 'name', 'type', 'phone', 'email', 'createdAt'];
-const STOCK_HEADERS = ['id', 'name', 'date', 'replaced', 'replacedDate', 'createdAt'];
+const STOCK_HEADERS = ['id', 'name', 'date', 'remaining', 'photo', 'replaced', 'replacedDate', 'createdAt'];
 const SESSION_VERSION_KEY = 'sarmart_session_version';
 
 function doGet(e) {
