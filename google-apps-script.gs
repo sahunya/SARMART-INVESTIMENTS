@@ -39,6 +39,7 @@ function doPost(e) {
   if (body.action === 'createContact') return output_({ ok: true, data: createContact_(body.contact) });
   if (body.action === 'createStock') return output_({ ok: true, data: createStock_(body.item) });
   if (body.action === 'updateStock') return output_({ ok: true, data: updateStock_(body.item) });
+  if (body.action === 'deleteStock') return output_({ ok: true, data: deleteStock_(body.item && body.item.id) });
   if (body.action === 'logoutOtherDevices') return output_({ ok: true, data: rotateSessionVersion_() });
   return output_({ ok: false, error: 'Unknown action' });
 }
@@ -182,4 +183,16 @@ function updateStock_(item) {
   const values = { ...old, ...item };
   sheet.getRange(index + 2, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]);
   return item;
+}
+
+function deleteStock_(id) {
+  if (!id) throw new Error('Missing out-of-stock item ID.');
+  const sheet = stockSheet_();
+  const rowCount = sheet.getLastRow() - 1;
+  if (rowCount < 1) throw new Error('Out-of-stock item not found.');
+  const ids = sheet.getRange(2, 1, rowCount, 1).getValues().flat();
+  const index = ids.indexOf(id);
+  if (index === -1) throw new Error('Out-of-stock item not found.');
+  sheet.deleteRow(index + 2);
+  return { id: id };
 }
