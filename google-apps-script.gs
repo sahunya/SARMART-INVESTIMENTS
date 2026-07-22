@@ -1,198 +1,140 @@
 /**
- * SARMART INVESTIMENTS transaction service for Google Apps Script.
- *
- * Setup:
- * 1. Create a Google Sheet named "SARMART INVESTIMENTS Ledger".
- * 2. Open Extensions > Apps Script, replace its default file with this code,
- *    and update API_TOKEN below with a long private value.
- * 3. Deploy > New deployment > Web app. Execute as: Me. Who has access:
- *    Anyone. Copy the Web app URL into app.js.
+ * SARMART INVESTIMENTS online transaction service.
+ * Admin alone uses API_TOKEN. Assistant accounts receive a limited session
+ * token after signing in; they never receive the Sheet connection token.
  */
 const API_TOKEN = 'Sarmart_2026!xR7kP2vN9mQ4zL8tH5wC';
 const RECORDS_SHEET = 'Transactions';
 const CONTACTS_SHEET = 'Contacts';
 const STOCK_SHEET = 'Out of stock';
+const USERS_SHEET = 'App users';
 const HEADERS = ['id', 'type', 'name', 'category', 'party', 'amount', 'paidAmount', 'payments', 'status', 'date', 'time', 'due', 'notes', 'noteEntries', 'enteredBy', 'color', 'createdAt'];
 const CONTACT_HEADERS = ['id', 'name', 'type', 'phone', 'email', 'createdAt'];
 const STOCK_HEADERS = ['id', 'name', 'date', 'remaining', 'photo', 'replaced', 'replacedDate', 'createdAt'];
+const USER_HEADERS = ['id', 'username', 'passwordHash', 'role', 'active', 'createdAt'];
 const SESSION_VERSION_KEY = 'sarmart_session_version';
+const SESSION_PREFIX = 'sarmart_user_session_';
+const PASSWORD_SALT_KEY = 'sarmart_password_salt';
 
 function doGet(e) {
-  if ((e.parameter || {}).token !== API_TOKEN) return output_({ ok: false, error: 'Unauthorized' });
-  if (e.parameter.action === 'listContacts') return output_({ ok: true, data: listContacts_() });
-  if (e.parameter.action === 'listStock') return output_({ ok: true, data: listStock_() });
-  if (e.parameter.action === 'getSessionVersion') return output_({ ok: true, data: { version: sessionVersion_() } });
-  return output_({ ok: true, data: listRecords_() });
+  const request = e.parameter || {};
+  return handle_(request);
 }
 
 function doPost(e) {
-  let body;
   try {
-    body = JSON.parse((e.postData && e.postData.contents) || '{}');
+    return handle_(JSON.parse((e.postData && e.postData.contents) || '{}'));
   } catch (error) {
     return output_({ ok: false, error: 'Invalid request body.' });
   }
-  if (body.token !== API_TOKEN) return output_({ ok: false, error: 'Unauthorized' });
-  if (body.action === 'create') return output_({ ok: true, data: createRecord_(body.record) });
-  if (body.action === 'update') return output_({ ok: true, data: updateRecord_(body.record) });
-  if (body.action === 'delete') return output_({ ok: true, data: deleteRecord_(body.id) });
-  if (body.action === 'createContact') return output_({ ok: true, data: createContact_(body.contact) });
-  if (body.action === 'createStock') return output_({ ok: true, data: createStock_(body.item) });
-  if (body.action === 'updateStock') return output_({ ok: true, data: updateStock_(body.item) });
-  if (body.action === 'deleteStock') return output_({ ok: true, data: deleteStock_(body.item && body.item.id) });
-  if (body.action === 'logoutOtherDevices') return output_({ ok: true, data: rotateSessionVersion_() });
-  return output_({ ok: false, error: 'Unknown action' });
 }
 
-function output_(data) {
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
-}
-
-function sessionVersion_() {
-  return PropertiesService.getScriptProperties().getProperty(SESSION_VERSION_KEY) || '1';
-}
-
-function rotateSessionVersion_() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+function handle_(request) {
   try {
-    const version = String(Date.now());
-    PropertiesService.getScriptProperties().setProperty(SESSION_VERSION_KEY, version);
-    return { version: version };
-  } finally {
-    lock.releaseLock();
+    const action = request.action || 'list';
+    if (action === 'login') return output_({ ok: true, data: login_(request.username, request.password) });
+    const actor = authorize_(request);
+    if (!actor) return output_({ ok: false, error: 'Unauthorized' });
+    if (!allowed_(actor, action)) return output_({ ok: false, error: 'Not allowed for this account.' });
+    return output_({ ok: true, data: dispatch_(action, request, actor) });
+  } catch (error) {
+    return output_({ ok: false, error: error.message || 'Request failed.' });
   }
 }
 
-function sheet_() {
-  return ensureSheet_(RECORDS_SHEET, HEADERS);
+function dispatch_(action, request, actor) {
+  if (action === 'list') return listRecords_();
+  if (action === 'listContacts') return listContacts_();
+  if (action === 'listStock') return listStock_();
+  if (action === 'getSessionVersion') return { version: sessionVersion_() };
+  if (action === 'create') return createRecord_(request.record);
+  if (action === 'update') return updateRecord_(request.record);
+  if (action === 'delete') return deleteRecord_(request.id);
+  if (action === 'createContact') return createContact_(request.contact);
+  if (action === 'createStock') return createStock_(request.item);
+  if (action === 'updateStock') return updateStock_(request.item);
+  if (action === 'deleteStock') return deleteStock_(request.item && request.item.id);
+  if (action === 'createUser') return createUser_(request.user);
+  if (action === 'listUsers') return listUsers_();
+  if (action === 'logoutOtherDevices') return rotateSessionVersion_();
+  throw new Error('Unknown action');
 }
 
-function contactsSheet_() {
-  return ensureSheet_(CONTACTS_SHEET, CONTACT_HEADERS);
+function allowed_(actor, action) {
+  if (actor.role === 'admin') return true;
+  const normal = ['list', 'listContacts', 'listStock', 'getSessionVersion', 'create', 'update', 'delete', 'createContact'];
+  const stock = ['listStock', 'getSessionVersion', 'createStock', 'updateStock'];
+  return (actor.role === 'assistant' ? normal : stock).includes(action);
 }
 
-function stockSheet_() {
-  return ensureSheet_(STOCK_SHEET, STOCK_HEADERS);
-}
-
-function ensureSheet_(name, headers) {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = spreadsheet.getSheetByName(name);
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(name);
-    sheet.appendRow(headers);
-    sheet.setFrozenRows(1);
-  } else {
-    const existingHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    headers.filter(header => !existingHeaders.includes(header)).forEach(header => sheet.getRange(1, sheet.getLastColumn() + 1).setValue(header));
+function authorize_(request) {
+  if (request.token === API_TOKEN) return { role: 'admin', username: 'sam' };
+  const session = request.session;
+  if (!session) return null;
+  const raw = PropertiesService.getScriptProperties().getProperty(SESSION_PREFIX + session);
+  if (!raw) return null;
+  const data = JSON.parse(raw);
+  if (data.expiresAt < Date.now() || data.version !== sessionVersion_()) {
+    PropertiesService.getScriptProperties().deleteProperty(SESSION_PREFIX + session);
+    return null;
   }
-  return sheet;
+  return { id: data.id, username: data.username, role: data.role };
 }
 
-function listRecords_() {
-  const values = sheet_().getDataRange().getValues();
+function login_(username, password) {
+  if (!username || !password) throw new Error('Username and password are required.');
+  const user = listUsers_().find(entry => entry.active && entry.username.toLowerCase() === String(username).trim().toLowerCase());
+  if (!user || user.passwordHash !== passwordHash_(password)) throw new Error('Incorrect username or password.');
+  const session = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  const data = { id: user.id, username: user.username, role: user.role, version: sessionVersion_(), expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 30 };
+  PropertiesService.getScriptProperties().setProperty(SESSION_PREFIX + session, JSON.stringify(data));
+  return { session: session, username: user.username, role: user.role, sessionVersion: data.version };
+}
+
+function createUser_(user) {
+  if (!user || !user.username || !user.password || !['assistant', 'stock'].includes(user.role)) throw new Error('Enter an assistant username, password, and role.');
+  const username = String(user.username).trim();
+  if (username.length < 3 || String(user.password).length < 3) throw new Error('Username and password must have at least 3 characters.');
+  if (listUsers_().some(entry => entry.username.toLowerCase() === username.toLowerCase())) throw new Error('That username is already in use.');
+  const entry = { id: Utilities.getUuid(), username: username, passwordHash: passwordHash_(user.password), role: user.role, active: true, createdAt: new Date().toISOString() };
+  const sheet = usersSheet_();
+  sheet.appendRow(USER_HEADERS.map(header => entry[header] ?? ''));
+  return { id: entry.id, username: entry.username, role: entry.role, active: true };
+}
+
+function listUsers_() {
+  const values = usersSheet_().getDataRange().getValues();
   if (values.length < 2) return [];
   const headers = values.shift();
-  return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
+  return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? '']))).map(user => ({ ...user, active: String(user.active).toLowerCase() === 'true' }));
 }
 
-function createRecord_(record) {
-  if (!record || !record.id || !record.type || !Number.isFinite(Number(record.amount)) || !record.date) throw new Error('Missing transaction details.');
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    const sheet = sheet_();
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const values = { ...record, createdAt: new Date().toISOString() };
-    sheet.appendRow(headers.map(header => serialize_(values[header])));
-  } finally {
-    lock.releaseLock();
-  }
-  return record;
+function passwordHash_(password) {
+  const props = PropertiesService.getScriptProperties();
+  let salt = props.getProperty(PASSWORD_SALT_KEY);
+  if (!salt) { salt = Utilities.getUuid(); props.setProperty(PASSWORD_SALT_KEY, salt); }
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + String(password), Utilities.Charset.UTF_8);
+  return bytes.map(byte => ('0' + (byte & 0xFF).toString(16)).slice(-2)).join('');
 }
 
-function updateRecord_(record) {
-  if (!record || !record.id) throw new Error('Missing transaction ID.');
-  const sheet = sheet_();
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const ids = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 0), 1).getValues().flat();
-  const index = ids.indexOf(record.id);
-  if (index === -1) throw new Error('Transaction not found.');
-  const old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(index + 2, i + 1).getValue()]));
-  const values = { ...old, ...record };
-  sheet.getRange(index + 2, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]);
-  return record;
-}
-
-function serialize_(value) {
-  return value && typeof value === 'object' ? JSON.stringify(value) : value ?? '';
-}
-
-function deleteRecord_(id) {
-  const sheet = sheet_();
-  const rowCount = sheet.getLastRow() - 1;
-  if (rowCount < 1) throw new Error('Transaction not found.');
-  const ids = sheet.getRange(2, 1, rowCount, 1).getValues().flat();
-  const index = ids.indexOf(id);
-  if (index === -1) throw new Error('Transaction not found.');
-  sheet.deleteRow(index + 2);
-  return { id: id };
-}
-
-function listContacts_() {
-  const values = contactsSheet_().getDataRange().getValues();
-  if (values.length < 2) return [];
-  const headers = values.shift();
-  return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
-}
-
-function createContact_(contact) {
-  if (!contact || !contact.id || !contact.name) throw new Error('Missing contact details.');
-  const sheet = contactsSheet_();
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const values = { ...contact, createdAt: new Date().toISOString() };
-  sheet.appendRow(headers.map(header => values[header] ?? ''));
-  return contact;
-}
-
-function listStock_() {
-  const values = stockSheet_().getDataRange().getValues();
-  if (values.length < 2) return [];
-  const headers = values.shift();
-  return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
-}
-
-function createStock_(item) {
-  if (!item || !item.id || !item.name || !item.date) throw new Error('Missing out-of-stock item details.');
-  const sheet = stockSheet_();
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const values = { ...item, createdAt: new Date().toISOString() };
-  sheet.appendRow(headers.map(header => serialize_(values[header])));
-  return item;
-}
-
-function updateStock_(item) {
-  if (!item || !item.id) throw new Error('Missing out-of-stock item ID.');
-  const sheet = stockSheet_();
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const ids = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 0), 1).getValues().flat();
-  const index = ids.indexOf(item.id);
-  if (index === -1) throw new Error('Out-of-stock item not found.');
-  const old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(index + 2, i + 1).getValue()]));
-  const values = { ...old, ...item };
-  sheet.getRange(index + 2, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]);
-  return item;
-}
-
-function deleteStock_(id) {
-  if (!id) throw new Error('Missing out-of-stock item ID.');
-  const sheet = stockSheet_();
-  const rowCount = sheet.getLastRow() - 1;
-  if (rowCount < 1) throw new Error('Out-of-stock item not found.');
-  const ids = sheet.getRange(2, 1, rowCount, 1).getValues().flat();
-  const index = ids.indexOf(id);
-  if (index === -1) throw new Error('Out-of-stock item not found.');
-  sheet.deleteRow(index + 2);
-  return { id: id };
-}
+function output_(data) { return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON); }
+function sessionVersion_() { return PropertiesService.getScriptProperties().getProperty(SESSION_VERSION_KEY) || '1'; }
+function rotateSessionVersion_() { const version = String(Date.now()); PropertiesService.getScriptProperties().setProperty(SESSION_VERSION_KEY, version); return { version: version }; }
+function sheet_() { return ensureSheet_(RECORDS_SHEET, HEADERS); }
+function contactsSheet_() { return ensureSheet_(CONTACTS_SHEET, CONTACT_HEADERS); }
+function stockSheet_() { return ensureSheet_(STOCK_SHEET, STOCK_HEADERS); }
+function usersSheet_() { return ensureSheet_(USERS_SHEET, USER_HEADERS); }
+function ensureSheet_(name, headers) { const spreadsheet = SpreadsheetApp.getActiveSpreadsheet(); let sheet = spreadsheet.getSheetByName(name); if (!sheet) { sheet = spreadsheet.insertSheet(name); sheet.appendRow(headers); sheet.setFrozenRows(1); } else { const existing = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]; headers.filter(header => !existing.includes(header)).forEach(header => sheet.getRange(1, sheet.getLastColumn() + 1).setValue(header)); } return sheet; }
+function serialize_(value) { return value && typeof value === 'object' ? JSON.stringify(value) : value ?? ''; }
+function rows_(sheet) { const values = sheet.getDataRange().getValues(); if (values.length < 2) return []; const headers = values.shift(); return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? '']))); }
+function findRow_(sheet, id) { const count = sheet.getLastRow() - 1; if (count < 1) return -1; return sheet.getRange(2, 1, count, 1).getValues().flat().indexOf(id) + 2; }
+function listRecords_() { return rows_(sheet_()); }
+function createRecord_(record) { if (!record || !record.id || !record.type || !Number.isFinite(Number(record.amount)) || !record.date) throw new Error('Missing transaction details.'); const sheet = sheet_(), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...record, createdAt: new Date().toISOString() }; sheet.appendRow(headers.map(header => serialize_(values[header]))); return record; }
+function updateRecord_(record) { if (!record || !record.id) throw new Error('Missing transaction ID.'); const sheet = sheet_(), row = findRow_(sheet, record.id); if (row < 2) throw new Error('Transaction not found.'); const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(row, i + 1).getValue()])), values = { ...old, ...record }; sheet.getRange(row, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]); return record; }
+function deleteRecord_(id) { const sheet = sheet_(), row = findRow_(sheet, id); if (row < 2) throw new Error('Transaction not found.'); sheet.deleteRow(row); return { id: id }; }
+function listContacts_() { return rows_(contactsSheet_()); }
+function createContact_(contact) { if (!contact || !contact.id || !contact.name) throw new Error('Missing contact details.'); const sheet = contactsSheet_(), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...contact, createdAt: new Date().toISOString() }; sheet.appendRow(headers.map(header => serialize_(values[header]))); return contact; }
+function listStock_() { return rows_(stockSheet_()); }
+function createStock_(item) { if (!item || !item.id || !item.name || !item.date) throw new Error('Missing out-of-stock item details.'); const sheet = stockSheet_(), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...item, createdAt: new Date().toISOString() }; sheet.appendRow(headers.map(header => serialize_(values[header]))); return item; }
+function updateStock_(item) { if (!item || !item.id) throw new Error('Missing out-of-stock item ID.'); const sheet = stockSheet_(), row = findRow_(sheet, item.id); if (row < 2) throw new Error('Out-of-stock item not found.'); const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(row, i + 1).getValue()])), values = { ...old, ...item }; sheet.getRange(row, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]); return item; }
+function deleteStock_(id) { if (!id) throw new Error('Missing out-of-stock item ID.'); const sheet = stockSheet_(), row = findRow_(sheet, id); if (row < 2) throw new Error('Out-of-stock item not found.'); sheet.deleteRow(row); return { id: id }; }
