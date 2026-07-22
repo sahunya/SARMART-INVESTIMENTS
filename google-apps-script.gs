@@ -16,107 +16,16 @@ const SESSION_VERSION_KEY = 'sarmart_session_version';
 const SESSION_PREFIX = 'sarmart_user_session_';
 const PASSWORD_SALT_KEY = 'sarmart_password_salt';
 
-function doGet(e) {
-  const request = e.parameter || {};
-  return handle_(request);
-}
-
-function doPost(e) {
-  try {
-    return handle_(JSON.parse((e.postData && e.postData.contents) || '{}'));
-  } catch (error) {
-    return output_({ ok: false, error: 'Invalid request body.' });
-  }
-}
-
-function handle_(request) {
-  try {
-    const action = request.action || 'list';
-    if (action === 'login') return output_({ ok: true, data: login_(request.username, request.password) });
-    const actor = authorize_(request);
-    if (!actor) return output_({ ok: false, error: 'Unauthorized' });
-    if (!allowed_(actor, action)) return output_({ ok: false, error: 'Not allowed for this account.' });
-    return output_({ ok: true, data: dispatch_(action, request, actor) });
-  } catch (error) {
-    return output_({ ok: false, error: error.message || 'Request failed.' });
-  }
-}
-
-function dispatch_(action, request, actor) {
-  if (action === 'list') return listRecords_();
-  if (action === 'listContacts') return listContacts_();
-  if (action === 'listStock') return listStock_();
-  if (action === 'getSessionVersion') return { version: sessionVersion_() };
-  if (action === 'create') return createRecord_(request.record);
-  if (action === 'update') return updateRecord_(request.record);
-  if (action === 'delete') return deleteRecord_(request.id);
-  if (action === 'createContact') return createContact_(request.contact);
-  if (action === 'createStock') return createStock_(request.item);
-  if (action === 'updateStock') return updateStock_(request.item);
-  if (action === 'deleteStock') return deleteStock_(request.item && request.item.id);
-  if (action === 'createUser') return createUser_(request.user);
-  if (action === 'listUsers') return listUsers_();
-  if (action === 'logoutOtherDevices') return rotateSessionVersion_();
-  throw new Error('Unknown action');
-}
-
-function allowed_(actor, action) {
-  if (actor.role === 'admin') return true;
-  const normal = ['list', 'listContacts', 'listStock', 'getSessionVersion', 'create', 'update', 'delete', 'createContact'];
-  const stock = ['listStock', 'getSessionVersion', 'createStock', 'updateStock'];
-  return (actor.role === 'assistant' ? normal : stock).includes(action);
-}
-
-function authorize_(request) {
-  if (request.token === API_TOKEN) return { role: 'admin', username: 'sam' };
-  const session = request.session;
-  if (!session) return null;
-  const raw = PropertiesService.getScriptProperties().getProperty(SESSION_PREFIX + session);
-  if (!raw) return null;
-  const data = JSON.parse(raw);
-  if (data.expiresAt < Date.now() || data.version !== sessionVersion_()) {
-    PropertiesService.getScriptProperties().deleteProperty(SESSION_PREFIX + session);
-    return null;
-  }
-  return { id: data.id, username: data.username, role: data.role };
-}
-
-function login_(username, password) {
-  if (!username || !password) throw new Error('Username and password are required.');
-  const user = listUsers_().find(entry => entry.active && entry.username.toLowerCase() === String(username).trim().toLowerCase());
-  if (!user || user.passwordHash !== passwordHash_(password)) throw new Error('Incorrect username or password.');
-  const session = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
-  const data = { id: user.id, username: user.username, role: user.role, version: sessionVersion_(), expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 30 };
-  PropertiesService.getScriptProperties().setProperty(SESSION_PREFIX + session, JSON.stringify(data));
-  return { session: session, username: user.username, role: user.role, sessionVersion: data.version };
-}
-
-function createUser_(user) {
-  if (!user || !user.username || !user.password || !['assistant', 'stock'].includes(user.role)) throw new Error('Enter an assistant username, password, and role.');
-  const username = String(user.username).trim();
-  if (username.length < 3 || String(user.password).length < 3) throw new Error('Username and password must have at least 3 characters.');
-  if (listUsers_().some(entry => entry.username.toLowerCase() === username.toLowerCase())) throw new Error('That username is already in use.');
-  const entry = { id: Utilities.getUuid(), username: username, passwordHash: passwordHash_(user.password), role: user.role, active: true, createdAt: new Date().toISOString() };
-  const sheet = usersSheet_();
-  sheet.appendRow(USER_HEADERS.map(header => entry[header] ?? ''));
-  return { id: entry.id, username: entry.username, role: entry.role, active: true };
-}
-
-function listUsers_() {
-  const values = usersSheet_().getDataRange().getValues();
-  if (values.length < 2) return [];
-  const headers = values.shift();
-  return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? '']))).map(user => ({ ...user, active: String(user.active).toLowerCase() === 'true' }));
-}
-
-function passwordHash_(password) {
-  const props = PropertiesService.getScriptProperties();
-  let salt = props.getProperty(PASSWORD_SALT_KEY);
-  if (!salt) { salt = Utilities.getUuid(); props.setProperty(PASSWORD_SALT_KEY, salt); }
-  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + String(password), Utilities.Charset.UTF_8);
-  return bytes.map(byte => ('0' + (byte & 0xFF).toString(16)).slice(-2)).join('');
-}
-
+function doGet(e) { return handle_(e.parameter || {}); }
+function doPost(e) { try { return handle_(JSON.parse((e.postData && e.postData.contents) || '{}')); } catch (error) { return output_({ ok: false, error: 'Invalid request body.' }); } }
+function handle_(request) { try { const action = request.action || 'list'; if (action === 'login') return output_({ ok: true, data: login_(request.username, request.password) }); const actor = authorize_(request); if (!actor) return output_({ ok: false, error: 'Unauthorized' }); if (!allowed_(actor, action)) return output_({ ok: false, error: 'Not allowed for this account.' }); return output_({ ok: true, data: dispatch_(action, request) }); } catch (error) { return output_({ ok: false, error: error.message || 'Request failed.' }); } }
+function dispatch_(action, request) { if (action === 'list') return listRecords_(); if (action === 'listContacts') return listContacts_(); if (action === 'listStock') return listStock_(); if (action === 'getSessionVersion') return { version: sessionVersion_() }; if (action === 'create') return createRecord_(request.record); if (action === 'update') return updateRecord_(request.record); if (action === 'delete') return deleteRecord_(request.id); if (action === 'createContact') return createContact_(request.contact); if (action === 'createStock') return createStock_(request.item); if (action === 'updateStock') return updateStock_(request.item); if (action === 'deleteStock') return deleteStock_(request.item && request.item.id); if (action === 'createUser') return createUser_(request.user); if (action === 'listUsers') return listUsers_(); if (action === 'logoutOtherDevices') return rotateSessionVersion_(); throw new Error('Unknown action'); }
+function allowed_(actor, action) { if (actor.role === 'admin') return true; const normal = ['list', 'listContacts', 'listStock', 'getSessionVersion', 'create', 'update', 'delete', 'createContact']; const stock = ['listStock', 'getSessionVersion', 'createStock', 'updateStock']; return (actor.role === 'assistant' ? normal : stock).includes(action); }
+function authorize_(request) { if (request.token === API_TOKEN) return { role: 'admin', username: 'sam' }; const session = request.session; if (!session) return null; const raw = PropertiesService.getScriptProperties().getProperty(SESSION_PREFIX + session); if (!raw) return null; const data = JSON.parse(raw); if (data.expiresAt < Date.now() || data.version !== sessionVersion_()) { PropertiesService.getScriptProperties().deleteProperty(SESSION_PREFIX + session); return null; } return { id: data.id, username: data.username, role: data.role }; }
+function login_(username, password) { if (!username || !password) throw new Error('Username and password are required.'); const user = listUsers_().find(entry => entry.active && entry.username.toLowerCase() === String(username).trim().toLowerCase()); if (!user || user.passwordHash !== passwordHash_(password)) throw new Error('Incorrect username or password.'); const session = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, ''); const data = { id: user.id, username: user.username, role: user.role, version: sessionVersion_(), expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 30 }; PropertiesService.getScriptProperties().setProperty(SESSION_PREFIX + session, JSON.stringify(data)); return { session: session, username: user.username, role: user.role, sessionVersion: data.version }; }
+function createUser_(user) { if (!user || !user.username || !user.password || !['assistant', 'stock'].includes(user.role)) throw new Error('Enter an assistant username, password, and role.'); const username = String(user.username).trim(); if (username.length < 3 || String(user.password).length < 3) throw new Error('Username and password must have at least 3 characters.'); if (listUsers_().some(entry => entry.username.toLowerCase() === username.toLowerCase())) throw new Error('That username is already in use.'); const entry = { id: Utilities.getUuid(), username: username, passwordHash: passwordHash_(user.password), role: user.role, active: true, createdAt: new Date().toISOString() }; const sheet = usersSheet_(); sheet.appendRow(USER_HEADERS.map(header => entry[header] ?? '')); return { id: entry.id, username: entry.username, role: entry.role, active: true }; }
+function listUsers_() { const values = usersSheet_().getDataRange().getValues(); if (values.length < 2) return []; const headers = values.shift(); return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? '']))).map(user => ({ ...user, active: String(user.active).toLowerCase() === 'true' })); }
+function passwordHash_(password) { const props = PropertiesService.getScriptProperties(); let salt = props.getProperty(PASSWORD_SALT_KEY); if (!salt) { salt = Utilities.getUuid(); props.setProperty(PASSWORD_SALT_KEY, salt); } const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + String(password), Utilities.Charset.UTF_8); return bytes.map(byte => ('0' + (byte & 0xFF).toString(16)).slice(-2)).join(''); }
 function output_(data) { return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON); }
 function sessionVersion_() { return PropertiesService.getScriptProperties().getProperty(SESSION_VERSION_KEY) || '1'; }
 function rotateSessionVersion_() { const version = String(Date.now()); PropertiesService.getScriptProperties().setProperty(SESSION_VERSION_KEY, version); return { version: version }; }
