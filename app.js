@@ -8,7 +8,7 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 function applyAppearance(settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system'})){const fonts={system:'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',arial:'Arial,Helvetica,sans-serif',verdana:'Verdana,Geneva,sans-serif',serif:'Georgia,serif'},size=settings.size||'15px',font=fonts[settings.font]||fonts.system;document.documentElement.style.setProperty('--user-font-size',size);document.documentElement.style.setProperty('--user-font-family',font);document.body?.style.setProperty('font-size',size,'important');document.body?.style.setProperty('font-family',font,'important');}
 document.addEventListener('click',event=>{if(event.target.closest('#stock-sign-out'))$('#sign-out').click();if(event.target.closest('#sign-out'))sessionStorage.removeItem(remoteSessionKey);});
 setInterval(()=>{if(currentUser?.role!=='admin'&&canSync()){syncPendingDeletes();pullAll(true);verifyRemoteSession();}},10000);
-const isStockManager=()=>currentUser?.role==='admin'||String(currentUser?.role||'').startsWith('stock-assistant-');
+const isStockManager=()=>!!currentUser;
 const isStockAssistant=()=>String(currentUser?.role||'').startsWith('stock-assistant-');
 const loginAccounts=()=>[{role:'admin',...accounts.admin}];
 const money=new Intl.NumberFormat('en-KE',{style:'currency',currency:'KES',maximumFractionDigits:0});
