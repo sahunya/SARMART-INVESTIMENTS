@@ -47,3 +47,11 @@ function listStock_() { return rows_(stockSheet_()); }
 function createStock_(item) { if (!item || !item.id || !item.name || !item.date) throw new Error('Missing out-of-stock item details.'); const sheet = stockSheet_(), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...item, createdAt: new Date().toISOString() }; sheet.appendRow(headers.map(header => serialize_(values[header]))); return item; }
 function updateStock_(item) { if (!item || !item.id) throw new Error('Missing out-of-stock item ID.'); const sheet = stockSheet_(), row = findRow_(sheet, item.id); if (row < 2) throw new Error('Out-of-stock item not found.'); const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(row, i + 1).getValue()])), values = { ...old, ...item }; sheet.getRange(row, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]); return item; }
 function deleteStock_(id) { if (!id) throw new Error('Missing out-of-stock item ID.'); const sheet = stockSheet_(), row = findRow_(sheet, id); if (row < 2) throw new Error('Out-of-stock item not found.'); sheet.deleteRow(row); return { id: id }; }
+function doGet(e) {
+  if (!e) {
+    return ContentService.createTextOutput("No parameters provided");
+  }
+
+  var name = e.parameter.name || "Guest";
+  return ContentService.createTextOutput("Hello " + name);
+}
