@@ -1,135 +1,737 @@
-const storageKey='sarmart-records-v2', contactsKey='sarmart-contacts-v1', stockKey='sarmart-out-of-stock-v1', stockPendingKey='sarmart-stock-pending-v1', assistantLoginsKey='sarmart-assistant-logins-v1', reconciliationKey='sarmart-reconciliation-v1', sessionKey='sarmart-current-user', remoteSessionKey='sarmart-remote-user-session', googleTokenKey='sarmart-google-sheet-token', appearanceKey='sarmart-appearance-v1', deletedKey='sarmart-pending-deletes-v1', pendingWritesKey='sarmart-pending-writes-v1';
-const GOOGLE_SCRIPT_URL='https://script.google.com/macros/s/AKfycbxXgbQjKl8EndI1uHFjRdjg6r5p13DtJRSQfuUafz6VcnksroKjxXnYR7sIEGCb-OqQRw/exec';
-const accounts={admin:{username:'sam',password:'123',label:'Administrator'}};
-const categories=['Inventory / stock','Rent','Utilities','Phone & internet','Transport','Salaries & wages','Marketing','Office supplies','Repairs & maintenance','Professional services','Taxes & licences','Other'];
-const readJson=(storage,key,fallback)=>{try{const value=JSON.parse(storage.getItem(key)||'null');return value??fallback;}catch{return fallback;}};
-let records=readJson(localStorage,storageKey,[]), contacts=readJson(localStorage,contactsKey,[]), outOfStock=readJson(localStorage,stockKey,[]), assistantLogins=readJson(localStorage,assistantLoginsKey,[]), reconciliation=readJson(localStorage,reconciliationKey,{}), currentUser=readJson(sessionStorage,sessionKey,null), pendingDeletes=new Set(readJson(localStorage,deletedKey,[])), pendingWrites=new Set(readJson(localStorage,pendingWritesKey,[])), pendingStockWrites=new Set(readJson(localStorage,stockPendingKey,[])), notificationFeed=[],cashMode='out', undoHistory=[], redoHistory=[],newStockPhoto='',editStockPhoto='';
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-function applyAppearance(settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system'})){const fonts={system:'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',arial:'Arial,Helvetica,sans-serif',verdana:'Verdana,Geneva,sans-serif',serif:'Georgia,serif'},size=settings.size||'15px',font=fonts[settings.font]||fonts.system;document.documentElement.style.setProperty('--user-font-size',size);document.documentElement.style.setProperty('--user-font-family',font);document.body?.style.setProperty('font-size',size,'important');document.body?.style.setProperty('font-family',font,'important');}
-document.addEventListener('click',event=>{if(event.target.closest('#stock-sign-out'))$('#sign-out').click();if(event.target.closest('#sign-out'))sessionStorage.removeItem(remoteSessionKey);});
-document.addEventListener('click',event=>{const edit=event.target.closest('[data-edit]'),remove=event.target.closest('[data-delete],[data-delete-imported]');if(remove&&currentUser?.role!=='admin'){event.preventDefault();event.stopImmediatePropagation();return;}if(edit&&currentUser?.role!=='admin'){const record=records.find(item=>item.id===edit.dataset.edit),role=String(currentUser?.role||''),normalAssistant=role==='assistant'||role.startsWith('assistant-');if(!normalAssistant||!record||record.type==='expense'){event.preventDefault();event.stopImmediatePropagation();}}},true);
-document.addEventListener('click',event=>{const button=event.target.closest('[data-payment]'),role=String(currentUser?.role||''),normalAssistant=role==='assistant'||role.startsWith('assistant-');if(!button||!normalAssistant)return;const record=records.find(item=>item.id===button.dataset.payment);if(!record)return;$('#payment-record-id').value=record.id;$('#payment-note').value='';setPaymentMode('payment',record);$('#payment-dialog').showModal();});
-const deleteAllStockButton=document.createElement('button');deleteAllStockButton.id='delete-all-stock';deleteAllStockButton.type='button';deleteAllStockButton.className='delete-btn hidden';deleteAllStockButton.textContent='Delete all out-of-stock items';$('#out-of-stock-list').before(deleteAllStockButton);
-const notificationPanel=document.createElement('section');notificationPanel.id='assistant-notifications';notificationPanel.className='panel hidden';notificationPanel.innerHTML='<div class="panel-head"><div><h2>Assistant notifications</h2><p>Recent changes made by assistants.</p></div></div><div id="assistant-notification-list"></div>';$('#dashboard').append(notificationPanel);const enableAlertsButton=document.createElement('button');enableAlertsButton.id='enable-phone-alerts';enableAlertsButton.type='button';enableAlertsButton.className='secondary-btn sign-out';enableAlertsButton.textContent='Enable phone alerts';$('#account-controls').prepend(enableAlertsButton);
-enableAlertsButton.addEventListener('click',async()=>{if(!('Notification'in window))return toast('Phone alerts are not supported by this browser.');const permission=await Notification.requestPermission();toast(permission==='granted'?'Phone alerts enabled':'Phone alerts were not enabled.');});
-document.addEventListener('click',async event=>{const stockButton=event.target.closest('#delete-all-stock'),assistantButton=event.target.closest('[data-delete-assistant]');if(stockButton){if(currentUser?.role!=='admin'||!confirm('Delete every Out-of-Stock item? This cannot be undone.'))return;try{await googleRequest('deleteAllStock');outOfStock=[];pendingStockWrites.clear();localStorage.setItem(stockPendingKey,'[]');save();toast('All Out-of-Stock items deleted');}catch{toast('Could not delete items. Check Google Sheet sync.');}return;}if(assistantButton){const id=assistantButton.dataset.deleteAssistant,login=assistantLogins.find(item=>item.id===id);if(currentUser?.role!=='admin'||!login||!confirm(`Delete login for ${login.username}? They will be signed out.`))return;try{await googleRequest('deleteUser',{id});assistantLogins=assistantLogins.filter(item=>item.id!==id);localStorage.setItem(assistantLoginsKey,JSON.stringify(assistantLogins));renderAssistantLogins();toast('Assistant login deleted');}catch{toast('Could not delete assistant login.');}}});
-setInterval(()=>{if(currentUser&&canSync()){syncPendingWrites();syncPendingStockWrites();}},10000);
-setInterval(()=>{enableAlertsButton.classList.toggle('hidden',currentUser?.role!=='admin');if(currentUser?.role==='admin'&&token())pullAssistantNotifications();},15000);
-setInterval(()=>{if(currentUser?.role!=='admin'&&canSync()){syncPendingDeletes();pullAll(true);verifyRemoteSession();}},10000);
-const isStockManager=()=>!!currentUser;
-const isStockAssistant=()=>String(currentUser?.role||'').startsWith('stock-assistant-');
-const loginAccounts=()=>[{role:'admin',...accounts.admin}];
-const money=new Intl.NumberFormat('en-KE',{style:'currency',currency:'KES',maximumFractionDigits:0});
-const today=()=>new Date().toISOString().slice(0,10); const dateText=value=>value?new Date(`${value}T00:00:00`).toLocaleDateString('en-KE',{day:'numeric',month:'short',year:'numeric'}):'—';
-const esc=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const typeName=type=>type==='receivable'?'Receivable':type==='payable'?'Payable':'Expense / Cash Out';
-const isDue=(r,days=0)=>r.due&&r.due<=new Date(Date.now()+days*86400000).toISOString().slice(0,10);
-function paid(r){return Math.abs(Number(r.paidAmount||0));} function outstanding(r){const amount=Number(r.amount||0);return amount>=0?amount-paid(r):amount+paid(r);}
-function statusOf(r){if(r.type==='expense')return 'recorded'; if(outstanding(r)<-0.001)return 'overpaid'; if(Math.abs(outstanding(r))<0.001)return 'paid'; if(paid(r)>0)return 'part-paid'; return isDue(r,-1)?'overdue':'open';}
-function paymentEntries(r){let entries=r.payments;if(typeof entries==='string'){try{entries=JSON.parse(entries);}catch{entries=[];}}return Array.isArray(entries)&&entries.length?entries:(paid(r)?[{amount:paid(r),date:r.lastPaymentDate||r.date}]:[]);}
-function paymentsThisMonth(r){const now=new Date();return paymentEntries(r).filter(p=>{const d=new Date(`${p.date}T00:00:00`);return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();}).reduce((sum,p)=>sum+Number(p.amount||0),0);}
-function noteEntries(r){let entries=r.noteEntries;if(typeof entries==='string'){try{entries=JSON.parse(entries);}catch{entries=[];}}if(Array.isArray(entries)&&entries.length)return entries;return String(r.notes||'').split(' · ').filter(Boolean).map(text=>({text,date:r.date,time:r.time,enteredBy:r.enteredBy||'Imported record'}));}
-function noteMeta(entry,r){const date=entry.date||r.date,time=entry.time||r.time||'—',person=entry.enteredBy||r.enteredBy||'Imported record',day=date?new Date(`${date}T00:00:00`).toLocaleDateString('en-KE',{weekday:'long',day:'numeric',month:'short',year:'numeric'}):'Date not recorded';return `${day} · ${time} · Entered by ${person}`;}
-function stateSnapshot(){return JSON.stringify({records,contacts});}let historyBaseline=stateSnapshot();
-function updateHistoryButtons(){$('#undo-action').disabled=!undoHistory.length;$('#redo-action').disabled=!redoHistory.length;}
-function save(track=true){const current=stateSnapshot();if(track&&current!==historyBaseline){undoHistory.push(historyBaseline);if(undoHistory.length>30)undoHistory.shift();redoHistory=[];}historyBaseline=current;localStorage.setItem(storageKey,JSON.stringify(records));localStorage.setItem(contactsKey,JSON.stringify(contacts));localStorage.setItem(stockKey,JSON.stringify(outOfStock));localStorage.setItem(deletedKey,JSON.stringify([...pendingDeletes]));localStorage.setItem(pendingWritesKey,JSON.stringify([...pendingWrites]));localStorage.setItem(stockPendingKey,JSON.stringify([...pendingStockWrites]));render();updateHistoryButtons();}
-function restoreHistory(target){const before=JSON.parse(historyBaseline),after=JSON.parse(target),beforeMap=new Map(before.records.map(r=>[r.id,r])),afterMap=new Map(after.records.map(r=>[r.id,r]));records=after.records;contacts=after.contacts;for(const [id,record] of afterMap){if(!beforeMap.has(id)){pendingDeletes.delete(id);sync('create',{record},true);}else if(JSON.stringify(record)!==JSON.stringify(beforeMap.get(id)))sync('update',{record},true);}for(const id of beforeMap.keys())if(!afterMap.has(id))pendingDeletes.add(id);historyBaseline=target;save(false);syncPendingDeletes();}
-function undo(){if(!undoHistory.length)return;const target=undoHistory.pop();redoHistory.push(historyBaseline);restoreHistory(target);toast('Last change undone');}
-function redo(){if(!redoHistory.length)return;const target=redoHistory.pop();undoHistory.push(historyBaseline);restoreHistory(target);toast('Change redone');}
-function token(){return localStorage.getItem(googleTokenKey)||'';} function remoteSession(){return readJson(sessionStorage,remoteSessionKey,null);} function canSync(){return currentUser?.role==='admin'?!!token():!!remoteSession()?.session;} function setSync(text,on=false){$('#sync-status').textContent=text;$('#sync-status').classList.toggle('connected',on);}
-async function googleRequest(action,payload={}){const admin=currentUser?.role==='admin',credential=admin?token():remoteSession()?.session;if(!credential)throw Error(admin?'Enter the private API token.':'Sign in again to connect.');const isList=['list','listContacts','listStock','getSessionVersion','listUsers','listNotifications'].includes(action),key=admin?'token':'session',url=isList?`${GOOGLE_SCRIPT_URL}?${key}=${encodeURIComponent(credential)}&action=${action}`:GOOGLE_SCRIPT_URL,body=admin?{token:credential,action,...payload}:{session:credential,action,...payload},options=isList?{}:{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)};const response=await fetch(url,options);const result=await response.json();if(!result.ok)throw Error(result.error||'Google Sheet request failed.');return result.data;}
-function fingerprint(items){return JSON.stringify(items.map(item=>Object.keys(item).sort().reduce((out,key)=>{out[key]=item[key];return out;},{})).sort((a,b)=>String(a.id).localeCompare(String(b.id))));}
-async function pullAll(quiet=false){if(!canSync())return {ok:false,message:currentUser?.role==='admin'?'Enter the private API token first.':'Sign in again to connect.'};if(!quiet)setSync('Syncing…');try{const cloud=await googleRequest('list');const parseList=value=>{if(typeof value!=='string')return value||[];try{return JSON.parse(value)||[];}catch{return [];}};const remote=cloud.map(r=>({...r,amount:Number(r.amount),paidAmount:Number(r.paidAmount||0),payments:parseList(r.payments),noteEntries:parseList(r.noteEntries)})).filter(r=>!pendingDeletes.has(r.id));const localPending=records.filter(r=>pendingWrites.has(r.id));const nextRecords=[...remote.filter(r=>!pendingWrites.has(r.id)),...localPending];let nextContacts=contacts,nextStock=outOfStock;try{nextContacts=await googleRequest('listContacts');}catch{}try{const remoteStock=await googleRequest('listStock'),localStock=new Map(outOfStock.map(item=>[item.id,item])),completeStock=remoteStock.map(item=>{const local=localStock.get(item.id);return {...item,remaining:item.remaining!==undefined?item.remaining:(local?.remaining||''),photo:item.photo!==undefined?item.photo:(local?.photo||'')};});nextStock=[...completeStock.filter(item=>!pendingStockWrites.has(item.id)),...outOfStock.filter(item=>pendingStockWrites.has(item.id))];}catch{}const changed=fingerprint(records)!==fingerprint(nextRecords)||fingerprint(contacts)!==fingerprint(nextContacts)||fingerprint(outOfStock)!==fingerprint(nextStock);if(changed&&!$('#record-dialog').open&&!$('#contact-dialog').open){records=nextRecords;contacts=nextContacts;outOfStock=nextStock;historyBaseline=stateSnapshot();localStorage.setItem(storageKey,JSON.stringify(records));localStorage.setItem(contactsKey,JSON.stringify(contacts));localStorage.setItem(stockKey,JSON.stringify(outOfStock));render();updateHistoryButtons();}if(!quiet)setSync('Google Sheet synced',true);return {ok:true};}catch(error){if(!quiet)setSync('Sheet unavailable');return {ok:false,message:error.message||'Browser could not reach Google Sheets.'};}}
-async function sync(action,payload,quiet=false){const recordId=payload?.record?.id;if(recordId){pendingWrites.add(recordId);localStorage.setItem(pendingWritesKey,JSON.stringify([...pendingWrites]));}if(!canSync())return false;try{await googleRequest(action,payload);if(recordId){pendingWrites.delete(recordId);localStorage.setItem(pendingWritesKey,JSON.stringify([...pendingWrites]));}setSync('Google Sheet synced',true);setTimeout(()=>pullAll(true),0);return true;}catch{setSync('Saved on this device');if(!quiet)toast('Saved locally. Sheet sync will retry.');return false;}}
-async function syncStock(action,item){pendingStockWrites.add(item.id);localStorage.setItem(stockPendingKey,JSON.stringify([...pendingStockWrites]));if(!canSync())return false;try{await googleRequest(action,{item});pendingStockWrites.delete(item.id);localStorage.setItem(stockPendingKey,JSON.stringify([...pendingStockWrites]));setSync('Google Sheet synced',true);setTimeout(()=>pullAll(true),0);return true;}catch{setSync('Saved on this device');toast('Saved on this device.');return false;}}
-async function syncPendingWrites(){if(!canSync())return;for(const id of [...pendingWrites]){const record=records.find(item=>item.id===id);if(!record){pendingWrites.delete(id);continue;}try{await googleRequest('update',{record});}catch{try{await googleRequest('create',{record});}catch{continue;}}pendingWrites.delete(id);localStorage.setItem(pendingWritesKey,JSON.stringify([...pendingWrites]));}if(!pendingWrites.size)pullAll(true);}
-async function syncPendingStockWrites(){if(!canSync())return;for(const id of [...pendingStockWrites]){const item=outOfStock.find(entry=>entry.id===id);if(!item){pendingStockWrites.delete(id);continue;}try{await googleRequest('updateStock',{item});}catch{try{await googleRequest('createStock',{item});}catch{continue;}}pendingStockWrites.delete(id);localStorage.setItem(stockPendingKey,JSON.stringify([...pendingStockWrites]));}if(!pendingStockWrites.size)pullAll(true);}
-async function syncPendingDeletes(){for(const id of [...pendingDeletes]){if(await sync('delete',{id},true)){pendingDeletes.delete(id);save();}}}
-async function verifyRemoteSession(){if(!currentUser||!canSync())return;try{const session=await googleRequest('getSessionVersion'),version=String(session.version||'1');if(!currentUser.sessionVersion){currentUser.sessionVersion=version;sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));return;}if(currentUser.sessionVersion!==version){sessionStorage.removeItem(sessionKey);sessionStorage.removeItem(remoteSessionKey);currentUser=null;$('#login-form').reset();updateLogin();toast('You were signed out by the Administrator.');}}catch{}}
-function toast(text){const el=$('#toast');el.textContent=text;el.classList.add('show-toast');setTimeout(()=>el.classList.remove('show-toast'),2600);}
-function monthRecord(r){const d=new Date(`${r.date}T00:00:00`),n=new Date();return d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear();}
-function filtered(type){let out=records.filter(r=>r.type===type);const search=$(`[data-filter="${type}"]`)?.value.trim().toLowerCase()||'';const status=$(`[data-status-filter="${type}"]`)?.value||'';const category=$('[data-category-filter]')?.value||'',from=$(`[data-date-from="${type}"]`)?.value||'',to=$(`[data-date-to="${type}"]`)?.value||'',min=$(`[data-min-total="${type}"]`)?.value,max=$(`[data-max-total="${type}"]`)?.value,sort=$(`[data-sort="${type}"]`)?.value||'newest';if(search)out=out.filter(r=>`${r.name} ${r.party} ${r.category} ${r.notes}`.toLowerCase().includes(search));if(status)out=out.filter(r=>statusOf(r)===status);if(category)out=out.filter(r=>r.category===category);if(from)out=out.filter(r=>String(r.createdAt||r.date||'').slice(0,10)>=from);if(to)out=out.filter(r=>String(r.createdAt||r.date||'').slice(0,10)<=to);if(min!=='')out=out.filter(r=>Math.abs(Number(r.amount||0))>=Number(min));if(max!=='')out=out.filter(r=>Math.abs(Number(r.amount||0))<=Number(max));const label=r=>String(r.party||r.name||'').toLowerCase();return out.sort((a,b)=>sort==='a-z'?label(a).localeCompare(label(b)):sort==='z-a'?label(b).localeCompare(label(a)):sort==='high-low'?Math.abs(Number(b.amount||0))-Math.abs(Number(a.amount||0)):sort==='low-high'?Math.abs(Number(a.amount||0))-Math.abs(Number(b.amount||0)):`${b.date||''}${b.createdAt||b.id||''}`.localeCompare(`${a.date||''}${a.createdAt||a.id||''}`));}
-function actions(r){const admin=currentUser?.role==='admin',role=String(currentUser?.role||''),assistant=role==='assistant'||role.startsWith('assistant-'),payButton=statusOf(r)!=='paid'&&outstanding(r)>0?`<button class="account-icon pay-icon" data-payment="${r.id}" title="Record payment" aria-label="Record payment">✓</button>`:'';if(!admin)return assistant&&r.type!=='expense'?`${payButton}<button class="account-icon edit-icon" data-edit="${r.id}" title="Edit entry" aria-label="Edit entry">✎</button>`:'';if(r.type==='expense')return `<button class="row-action" data-edit="${r.id}">Edit</button><button class="delete-btn" data-delete="${r.id}">Delete</button>`;return `${payButton}<button class="account-icon edit-icon" data-edit="${r.id}" title="Edit entry" aria-label="Edit entry">✎</button><button class="account-icon delete-icon" data-delete="${r.id}" title="Delete entry" aria-label="Delete entry">×</button>`;}
-function statusBadge(r){const status=statusOf(r);return `<span class="status ${status}">${status.replace('-',' ')}</span>`;}
-function tableRow(r){const color=/^#[0-9a-f]{6}$/i.test(r.color||'')?r.color:'';return `<div class="record-row" data-entry-id="${esc(r.id)}" data-color-record="${esc(r.id)}" style="--entry-highlight:${color}"><div><strong>${esc(r.name||'Untitled record')}</strong><span>${esc(r.type==='expense'?(r.category||'Other'):(r.party||'No contact'))}</span></div><span>${dateText(r.date)}</span><span>${r.type==='expense'?'—':dateText(r.due)}</span><div><strong class="amount ${r.type}">${money.format(r.amount)}</strong><span>${r.type==='expense'?'Recorded':`${money.format(paid(r))} paid`}</span></div><div>${statusBadge(r)}</div><div class="row-actions">${actions(r)}</div></div>`;}
-function accountCard(r){const receivable=r.type==='receivable',balance=outstanding(r),sign=receivable?(balance>=0?'+':'-'):(balance>=0?'-':'+'),party=r.party||r.name||'No contact',detail=[dateText(r.date),r.time||'—',r.due?`Due ${dateText(r.due)}`:'No due date'].filter(Boolean).join(' · '),notes=noteEntries(r),color=/^#[0-9a-f]{6}$/i.test(r.color||'')?r.color:'';return `<article class="account-card" data-entry-id="${esc(r.id)}" data-color-record="${esc(r.id)}" style="--entry-highlight:${color}"><div class="account-info"><strong>${esc(party)}</strong><span>${esc(detail)}</span>${notes.length?`<details class="account-notes"><summary>Notes (${notes.length}) <b>⌄</b></summary><div>${notes.map(note=>`<div class="note-history"><span>${esc(note.text)}</span><small>${esc(noteMeta(note,r))}</small></div>`).join('')}</div></details>`:''}</div><div class="account-money"><strong class="amount ${r.type}">${sign}${money.format(Math.abs(balance))}</strong></div><div class="account-actions">${actions(r)}</div></article>`;}
-function renderList(type){const items=filtered(type),target=$(`#${type}-list`);if(!items.length){target.innerHTML=`<div class="empty">No ${type==='expense'?'cash-out records':`${type}s`} yet.</div>`;return;}target.innerHTML=type==='expense'?`<div class="list-head"><span>Description</span><span>Date</span><span>Due date</span><span>Amount</span><span>Status</span><span></span></div>${items.map(tableRow).join('')}`:items.map(accountCard).join('');}
-function renderDashboard(){const rec=records.filter(r=>r.type==='receivable'),pay=records.filter(r=>r.type==='payable'),expenses=records.filter(r=>r.type==='expense'),directCashOut=expenses.filter(monthRecord).reduce((s,r)=>s+Number(r.amount),0),supplierPayments=pay.reduce((s,r)=>s+paymentsThisMonth(r),0),monthExpenses=directCashOut+supplierPayments,monthIncome=rec.reduce((s,r)=>s+paymentsThisMonth(r),0);$('#receivable-total').textContent=money.format(rec.reduce((s,r)=>s+outstanding(r),0));$('#payable-total').textContent=money.format(pay.reduce((s,r)=>s+outstanding(r),0));$('#expense-total').textContent=money.format(monthExpenses);$('#expense-count').textContent=`${expenses.length} cash-out entries recorded`;$('#net-total').textContent=money.format(monthIncome-monthExpenses);const recent=records.filter(r=>r.date===today()).sort((a,b)=>String(b.createdAt||b.id).localeCompare(String(a.createdAt||a.id)));$('#recent-list').innerHTML=recent.length?recent.map(r=>`<button class="activity-row activity-link" data-open-entry="${esc(r.id)}" data-open-type="${r.type}" type="button"><div class="record-icon ${r.type}">${r.type==='expense'?'↓':r.type==='receivable'?'↑':'→'}</div><div><h3>${esc(r.name||'Untitled record')}</h3><p>${typeName(r.type)} · ${r.type==='expense'?r.category||'Other':r.party||'No contact'}</p></div><div class="amount ${r.type}">${money.format(r.amount)}</div></button>`).join(''):'<div class="empty">No entries recorded today.</div>';const watch=[...rec,...pay].filter(r=>statusOf(r)!=='paid'&&r.due&&isDue(r,7)).sort((a,b)=>a.due.localeCompare(b.due));$('#alerts-list').innerHTML=watch.length?watch.map(r=>`<div class="alert-row ${statusOf(r)==='overdue'?'overdue-alert':''}"><div><strong>${esc(r.name||r.party||'Untitled record')}</strong><span>${typeName(r.type)} · Due ${dateText(r.due)}</span></div><div>${statusBadge(r)} <strong>${money.format(outstanding(r))}</strong></div></div>`).join(''):'<div class="empty small-empty">No due-date reminders right now.</div>';}
-function renderContacts(){const query=$('[data-contact-search]')?.value.toLowerCase()||'',items=contacts.filter(c=>`${c.name} ${c.type} ${c.phone} ${c.email}`.toLowerCase().includes(query));$('#contacts-list').innerHTML=items.length?`<div class="list-head contact-head"><span>Name</span><span>Type</span><span>Phone</span><span>Email</span></div>${items.map(c=>`<div class="contact-row"><strong>${esc(c.name)}</strong><span>${esc(c.type)}</span><span>${esc(c.phone||'—')}</span><span>${esc(c.email||'—')}</span></div>`).join('')}`:'<div class="empty">No saved contacts yet.</div>';const names=[...new Set([...contacts.map(c=>c.name),...records.map(r=>r.party)].map(name=>String(name||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));$('#contact-options').innerHTML=names.map(name=>`<option value="${esc(name)}"></option>`).join('');}
-function renderReports(){const expenses=records.filter(r=>r.type==='expense'&&monthRecord(r)),income=records.filter(r=>r.type==='receivable').reduce((s,r)=>s+paymentsThisMonth(r),0),directCashOut=expenses.reduce((s,r)=>s+Number(r.amount),0),supplierPayments=records.filter(r=>r.type==='payable').reduce((s,r)=>s+paymentsThisMonth(r),0),cash=directCashOut+supplierPayments;$('#report-income').textContent=money.format(income);$('#report-expense').textContent=money.format(cash);$('#report-net').textContent=money.format(income-cash);const grouped=Object.entries(expenses.reduce((a,r)=>{a[r.category||'Other']=(a[r.category||'Other']||0)+Number(r.amount);return a;},{}));$('#category-report').innerHTML=grouped.length?grouped.sort((a,b)=>b[1]-a[1]).map(([name,value])=>`<div class="report-row"><span>${esc(name)}</span><strong>${money.format(value)}</strong></div>`).join(''):'<div class="empty small-empty">No cash-out records this month.</div>';const balance=[...records.filter(r=>r.type==='receivable'||r.type==='payable')].filter(r=>statusOf(r)!=='paid');$('#balance-report').innerHTML=balance.length?balance.map(r=>`<div class="report-row"><span>${esc(r.party||r.name||'Untitled')} <small>${typeName(r.type)}</small></span><strong>${money.format(outstanding(r))}</strong></div>`).join(''):'<div class="empty small-empty">No unpaid balances.</div>';}
-function renderReports(){const expenses=records.filter(r=>r.type==='expense'&&monthRecord(r)),income=records.filter(r=>r.type==='receivable').reduce((s,r)=>s+paymentsThisMonth(r),0),directCashOut=expenses.reduce((s,r)=>s+Number(r.amount),0),supplierPayments=records.filter(r=>r.type==='payable').reduce((s,r)=>s+paymentsThisMonth(r),0),cash=directCashOut+supplierPayments;$('#report-income').textContent=money.format(income);$('#report-expense').textContent=money.format(cash);$('#report-net').textContent=money.format(income-cash);const grouped=Object.entries(expenses.reduce((a,r)=>{a[r.category||'Other']=(a[r.category||'Other']||0)+Number(r.amount);return a;},{}));$('#category-report').innerHTML=grouped.length?grouped.sort((a,b)=>b[1]-a[1]).map(([name,value])=>`<div class="report-row"><span>${esc(name)}</span><strong>${money.format(value)}</strong></div>`).join(''):'<div class="empty small-empty">No cash-out records this month.</div>';const balance=[...records.filter(r=>r.type==='receivable'||r.type==='payable')].filter(r=>statusOf(r)!=='paid');$('#balance-report').innerHTML=balance.length?balance.map(r=>`<div class="report-row"><span>${esc(r.party||r.name||'Untitled')} <small>${typeName(r.type)}</small></span><strong>${money.format(outstanding(r))}</strong></div>`).join(''):'<div class="empty small-empty">No unpaid balances.</div>';}
-const safePhoto=value=>/^data:image\/(png|jpeg|webp);base64,/i.test(String(value||''))?String(value):'';
-function stockPhotoMarkup(item){const photo=safePhoto(item.photo);return photo?`<img class="stock-thumb" src="${photo}" data-view-stock-photo="${item.id}" alt="Picture of ${esc(item.name)}" title="View picture" />`:'';}
-function renderStock(){const items=[...outOfStock].sort((a,b)=>Number(b.replaced)-Number(a.replaced)||String(b.replacedDate||b.date).localeCompare(String(a.replacedDate||a.date)));$('#out-of-stock-list').innerHTML=items.length?items.map(item=>`<details class="stock-row ${item.replaced?'replaced':''}"><summary>${stockPhotoMarkup(item)}<div class="stock-details"><strong>${esc(item.name)}</strong><span>${item.replaced?`Replaced ${dateText(item.replacedDate||item.date)}`:`Noted ${dateText(item.date)}`}</span></div><b class="stock-fold">⌄</b></summary><div class="stock-expanded">${item.remaining?`<small>${esc(item.remaining)}</small>`:'<small>No remaining-item notes.</small>'}<div class="stock-actions">${isStockManager()?`<button class="row-action" data-edit-stock="${item.id}">Edit</button>`:''}${item.replaced?(isStockManager()?`<button class="row-action" data-stock-out="${item.id}">↺ Unmark as replaced</button>`:'<span class="stock-done">✓ Replaced</span>'):isStockManager()?`<button class="row-action" data-stock-replace="${item.id}">✓ Mark replaced</button>`:'<span class="status open">Out of stock</span>'}${currentUser?.role==='admin'?`<button class="delete-btn" data-stock-delete="${item.id}">Delete</button>`:''}</div></div></details>`).join(''):'<div class="empty small-empty">No out-of-stock items noted.</div>';$('#delete-all-stock')?.classList.toggle('hidden',currentUser?.role!=='admin'||!items.length);}
-async function pullAssistantLogins(){if(currentUser?.role!=='admin'||!token())return;try{const users=await googleRequest('listUsers');assistantLogins=users.filter(user=>user.active).map(user=>({id:user.id,username:user.username,access:user.role==='stock'?'stock':'assistant'}));localStorage.setItem(assistantLoginsKey,JSON.stringify(assistantLogins));renderAssistantLogins();}catch{}}
-function renderAssistantNotifications(){const panel=$('#assistant-notifications'),target=$('#assistant-notification-list');if(!panel||!target)return;panel.classList.toggle('hidden',currentUser?.role!=='admin'||!notificationFeed.length);target.innerHTML=notificationFeed.slice(0,5).map(item=>`<div class="alert-row"><div><strong>${esc(item.message)}</strong><span>${dateText(String(item.createdAt||'').slice(0,10))}</span></div></div>`).join('');}
-async function pullAssistantNotifications(){if(currentUser?.role!=='admin'||!token())return;try{const list=await googleRequest('listNotifications');notificationFeed=list;renderAssistantNotifications();const newest=list[0]?.id,seen=localStorage.getItem('sarmart-last-assistant-alert');if(!newest||!seen){if(newest)localStorage.setItem('sarmart-last-assistant-alert',newest);return;}if(newest!==seen){const item=list[0];localStorage.setItem('sarmart-last-assistant-alert',newest);toast(item.message);if('Notification'in window&&Notification.permission==='granted')new Notification('SARMART assistant update',{body:item.message});}}catch{}}
-function renderAssistantLogins(){const target=$('#assistant-logins-list');target.innerHTML=assistantLogins.length?assistantLogins.map(login=>`<div class="assistant-login-row"><strong>${esc(login.username)}</strong><span>${login.access==='stock'?'Stock Assistant — Out of Stock only':'Assistant login'}</span>${currentUser?.role==='admin'?`<button class="delete-btn" data-delete-assistant="${esc(login.id)}">Delete</button>`:''}</div>`).join(''):'<div class="empty small-empty">No Assistant logins created yet.</div>';}
-function renderSectionTotals(){const receivable=records.filter(r=>r.type==='receivable').reduce((sum,r)=>sum+outstanding(r),0),payable=records.filter(r=>r.type==='payable').reduce((sum,r)=>sum+outstanding(r),0),cashOut=records.filter(r=>r.type==='expense').reduce((sum,r)=>sum+Number(r.amount||0),0),setTotal=(view,label,value)=>{const heading=$(`#${view} .section-heading > div:first-child`);if(!heading)return;let total=heading.querySelector('.section-total');if(!total){total=document.createElement('strong');total.className='section-total';heading.append(total);}total.textContent=`${label}: ${money.format(value)}`;};setTotal('expenses','Cash out total',cashOut);setTotal('receivables','Receivable total',receivable);setTotal('payables','Payable total',payable);}
-function renderReconciliation(){const selectedDate=$('#recon-date')?.value||reconciliation.date||today(),saved=reconciliation.date===selectedDate;$('#recon-date').value=selectedDate;$('#recon-sales').value=saved&&reconciliation.sales!==undefined?reconciliation.sales:'';$('#recon-purchases').value=saved&&reconciliation.purchases!==undefined?reconciliation.purchases:'';$('#recon-profit').value=saved&&reconciliation.profit!==undefined?reconciliation.profit:'';updateReconciliationStatus();}
-function updateReconciliationStatus(){const sales=Number($('#recon-sales').value||0),purchases=Number($('#recon-purchases').value||0),profit=Number($('#recon-profit').value||0),difference=sales-(purchases+profit),status=$('#recon-status');if(!status)return;status.classList.toggle('unbalanced',Math.abs(difference)>0.005);status.classList.toggle('balanced',Math.abs(difference)<=0.005);status.textContent=Math.abs(difference)<=0.005?'Less / Extra: KSh 0 (Balanced)':difference>0?`Extra: ${money.format(difference)}`:`Less: ${money.format(Math.abs(difference))}`;}
-function moveReconciliationToDashboard(){const panel=$('.reconciliation-panel'),dashboard=$('#dashboard'),alerts=$('#dashboard .alerts-panel');if(!panel||!dashboard)return;if(panel.parentElement!==dashboard){panel.classList.add('dashboard-reconciliation');dashboard.insertBefore(panel,alerts||dashboard.firstElementChild);}if(!$('#recon-date')){const label=document.createElement('label'),input=document.createElement('input');input.id='recon-date';input.type='date';input.value=reconciliation.date||today();input.addEventListener('change',renderReconciliation);label.append('Reconciliation date',input);panel.querySelector('.reconciliation-fields').before(label);}$('#reconciliation-title').textContent='Less / Extra';panel.querySelector('.reconciliation-note').textContent='This does not change receivables, payables, or cash totals.';$('#recon-profit').removeAttribute('readonly');}
-function render(){renderDashboard();['expense','receivable','payable'].forEach(renderList);renderContacts();renderReports();renderStock();renderAssistantLogins();renderAssistantNotifications();renderSectionTotals();renderReconciliation();}
-moveReconciliationToDashboard();
-function setCashMode(mode){cashMode=mode;$$('[data-cash-mode]').forEach(button=>button.classList.toggle('selected',button.dataset.cashMode===mode));}
-function openRecord(type,id=''){const r=id?records.find(x=>x.id===id):null;$('#record-form').reset();$('#record-id').value=id;$('#record-type').value=type;$('#record-date').value=r?.date||today();$('#record-name').value=r?.name||'';$('#record-category').value=r?.category||'Inventory / stock';$('#record-party').value=r?.party||'';$('#record-amount').value=r?.amount??'';$('#record-due').value=r?.due||'';$('#record-time').value=r?.time||new Date().toTimeString().slice(0,5);$('#record-status').value=r?statusOf(r):'open';$('#record-paid').value=r?.paidAmount||0;$('#record-notes').value=r?.notes||'';const expense=type==='expense';$('#category-field').style.display=expense?'grid':'none';$('#party-field').style.display='grid';$('#party-label').textContent=expense?'Description / person':'Name of the person';$('#record-party').placeholder=expense?'e.g. Office rent or supplier':"e.g. Mario's Hardware";$('#due-field').style.display=expense?'none':'grid';$('#payment-fields').style.display='none';$('#dialog-title').textContent=r?`Edit ${typeName(type).toLowerCase()}`:expense?'New cash entry':`New ${typeName(type).toLowerCase()}`;$('#record-dialog').showModal();}
-function editRecord(id){const r=records.find(x=>x.id===id);if(r)openRecord(r.type,id);}
-function setPaymentMode(mode,r){$('#payment-mode').value=mode;$$('[data-payment-mode]').forEach(button=>button.classList.toggle('selected',button.dataset.paymentMode===mode));const debt=mode==='debt';$('#payment-eyebrow').textContent=debt?'Add lending / debt':'Record payment';$('#payment-title').textContent=debt?'Add or reduce the balance':'Record a payment or correction';$('#payment-amount-label').textContent=debt?'Amount to add or reduce (KSh)':'Payment amount (KSh) — overpayment allowed';$('#payment-save').textContent=debt?'Save debt change':'Save payment';$('#payment-balance').textContent=`Current balance: ${money.format(outstanding(r))}`;$('#payment-amount').value=debt?'':outstanding(r);$('#payment-amount').removeAttribute('min');$('#payment-amount').removeAttribute('max');}
-function showView(view,updateLink=true){if(isStockAssistant())view='dashboard';if(!$('#'+view))view='dashboard';$$('.view').forEach(v=>v.classList.toggle('active-view',v.id===view));$$('.nav-link').forEach(v=>v.classList.toggle('active',v.dataset.view===view));const names={dashboard:'Business overview',expenses:'Expenses / Cash Out',receivables:'Accounts receivable',payables:'Accounts payable',contacts:'Contacts',reports:'Reports'};$('#page-title').textContent=names[view];$('#add-record').style.display='';if(updateLink&&location.hash!==`#${view}`)history.replaceState(null,'',`#${view}`);window.scrollTo({top:0,behavior:'smooth'});}
-function exportCsv(type){const items=type==='report'?records:filtered(type);const rows=[['Type','Description','Category','Contact','Amount','Paid amount','Status','Record date','Due date','Notes'],...items.map(r=>[typeName(r.type),r.name||'',r.category||'',r.party||'',r.amount,paid(r),statusOf(r),r.date,r.due||'',r.notes||''])];const csv=rows.map(row=>row.map(x=>`"${String(x).replaceAll('"','""')}"`).join(',')).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`sarmart-${type}-${today()}.csv`;a.click();URL.revokeObjectURL(a.href);}
-function downloadTemplate(type){const label=type==='receivable'?'Receivable':'Payable',contact=type==='receivable'?'Customer name':'Supplier name',rows=[['Type','Description','Category','Contact','Amount','Paid amount','Status','Record date','Due date','Notes'],[label,'Invoice or bill description','',contact,1000,0,'open',today(),'','Optional note']];if(window.XLSX){const book=XLSX.utils.book_new(),sheet=XLSX.utils.aoa_to_sheet(rows);sheet['!cols']=[{wch:18},{wch:28},{wch:22},{wch:24},{wch:14},{wch:16},{wch:14},{wch:16},{wch:16},{wch:28}];XLSX.utils.book_append_sheet(book,sheet,label+' Template');XLSX.writeFile(book,`sarmart-${type}-upload-template.xlsx`);}else{const csv=rows.map(row=>row.map(x=>`"${String(x).replaceAll('"','""')}"`).join(',')).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`sarmart-${type}-upload-template.csv`;a.click();}}
-function parseCsv(text){const rows=[];let row=[],field='',quoted=false;for(let i=0;i<text.length;i++){const char=text[i],next=text[i+1];if(char==='"'&&quoted&&next==='"'){field+='"';i++;}else if(char==='"')quoted=!quoted;else if(char===','&&!quoted){row.push(field);field='';}else if((char==='\n'||char==='\r')&&!quoted){if(char==='\r'&&next==='\n')i++;row.push(field);if(row.some(v=>v!==''))rows.push(row);row=[];field='';}else field+=char;}row.push(field);if(row.some(v=>v!==''))rows.push(row);return rows;}
-function importedType(value){const name=String(value||'').toLowerCase();return name.includes('receivable')?'receivable':name.includes('payable')?'payable':'expense';}
-function journalSectionImport(rows,onlyType){const initialFirst=String(rows[0]?.[0]??'').trim(),initialSecond=String(rows[0]?.[1]??'').trim(),headerlessReceivable=onlyType==='receivable'&&initialFirst&&Number.isNaN(Number(initialFirst))&&initialSecond!==''&&Number.isFinite(Number(initialSecond.replace(/[^0-9.-]/g,'')));let active=headerlessReceivable?'receivable':'',found=headerlessReceivable,imported=[];const isNumber=value=>value!==''&&Number.isFinite(Number(String(value).replace(/[^0-9.-]/g,'')));const cashInWords=/\b(cash|paid|repaid|given|deposit)\b/i;for(const row of rows){const first=String(row[0]??'').trim(),second=String(row[1]??'').trim(),third=String(row[2]??'').trim(),fourth=String(row[3]??'').trim(),heading=first.toUpperCase();if(heading.includes('ACCOUNTS RECEIVABLE')){active='receivable';found=true;continue;}if(heading.includes('ACCOUNTS PAYABLE')){active='payable';found=true;continue;}if(!found)continue;const namedBalance=active&&first&&!isNumber(first)&&isNumber(second)&&!third;if(namedBalance){if(!onlyType||active===onlyType)imported.push({id:crypto.randomUUID(),type:active,name:'Opening balance',category:'',party:first,amount:Math.abs(Number(second.replace(/[^0-9.-]/g,''))),date:today(),time:'',due:'',paidAmount:0,status:'open',notes:'Imported opening balance from SARMA JOURNALS',createdAt:new Date().toISOString()});continue;}active='';const amountSource=isNumber(first)?first:isNumber(second)?second:'';if(!amountSource)continue;const signedAmount=Number(amountSource.replace(/[^0-9.-]/g,''));if(!Number.isFinite(signedAmount)||signedAmount===0)continue;const note=isNumber(first)?[second,third,fourth].filter(Boolean).join(' · '):[third,fourth].filter(Boolean).join(' · ');const person=!isNumber(first)?first:'';const cashIn=signedAmount<0||cashInWords.test(note);const type=cashIn?'receivable':'expense';if(onlyType&&type!==onlyType)continue;const amount=Math.abs(signedAmount);imported.push({id:crypto.randomUUID(),type,name:note||person||'Imported journal entry',category:type==='expense'?'Other':'',party:type==='receivable'?person:'',amount,date:today(),time:'',due:'',paidAmount:type==='receivable'?amount:0,status:type==='receivable'?'paid':'recorded',notes:'Imported from SARMA JOURNALS',createdAt:new Date().toISOString()});}return found?imported:null;}
-function journalSectionImport(rows,onlyType){const isNumber=value=>{const cleaned=String(value??'').replace(/[^0-9.-]/g,'');return cleaned!==''&&cleaned!=='-'&&Number.isFinite(Number(cleaned));};const first=String(rows[0]?.[0]??'').trim(),second=String(rows[0]?.[1]??'').trim(),headerlessReceivable=onlyType==='receivable'&&first&&!isNumber(first)&&isNumber(second);let active=headerlessReceivable?'receivable':'',found=headerlessReceivable,imported=[];const cashInWords=/\b(cash|paid|repaid|given|deposit)\b/i;for(const row of rows){const left=String(row[0]??'').trim(),middle=String(row[1]??'').trim(),third=String(row[2]??'').trim(),fourth=String(row[3]??'').trim(),heading=left.toUpperCase();if(heading.includes('ACCOUNTS RECEIVABLE')){active='receivable';found=true;continue;}if(heading.includes('ACCOUNTS PAYABLE')){active='payable';found=true;continue;}if(!found)continue;const namedBalance=active&&left&&!isNumber(left)&&isNumber(middle)&&!third;if(namedBalance){if(!onlyType||active===onlyType)imported.push({id:crypto.randomUUID(),type:active,name:'Opening balance',category:'',party:left,amount:Math.abs(Number(middle.replace(/[^0-9.-]/g,''))),date:today(),time:'',due:'',paidAmount:0,status:'open',notes:'Imported opening balance from SARMA JOURNALS',createdAt:new Date().toISOString()});continue;}active='';const amountSource=isNumber(left)?left:isNumber(middle)?middle:'';if(!amountSource)continue;const signedAmount=Number(amountSource.replace(/[^0-9.-]/g,''));if(!Number.isFinite(signedAmount)||signedAmount===0)continue;const note=isNumber(left)?[middle,third,fourth].filter(Boolean).join(' · '):[third,fourth].filter(Boolean).join(' · '),party=!isNumber(left)?left:'',type=(signedAmount<0||cashInWords.test(note))?'receivable':'expense';if(onlyType&&type!==onlyType)continue;const amount=Math.abs(signedAmount);imported.push({id:crypto.randomUUID(),type,name:note||party||'Imported journal entry',category:type==='expense'?'Other':'',party:type==='receivable'?party:'',amount,date:today(),time:'',due:'',paidAmount:type==='receivable'?amount:0,status:type==='receivable'?'paid':'recorded',notes:'Imported from SARMA JOURNALS',createdAt:new Date().toISOString()});}return found?imported:null;}
-function financialStatementImport(rows,onlyType){const heading=rows[0].map(cell=>String(cell??'').toLowerCase()).join(' ');if(!heading.includes('receivable'))return null;const imported=[];let lastLabel='';for(const row of rows.slice(1)){const label=String(row[0]??'').trim(),raw=String(row[1]??'').trim();if(label)lastLabel=label;if(!raw||(!raw.toUpperCase().includes('KES')&&!/[0-9]/.test(raw)))continue;let cleaned=raw.toUpperCase().replace(/KES|,/g,'').replace(/\s/g,'');if(cleaned==='-'||cleaned==='')cleaned='0';const amount=Number(cleaned);if(!Number.isFinite(amount))continue;const type='receivable';if(onlyType&&onlyType!==type)continue;const name=label||lastLabel||'Imported receivable entry';imported.push({id:crypto.randomUUID(),type,name,category:'',party:name,amount,date:today(),time:'',due:'',paidAmount:0,status:'open',notes:'Imported from two-column financial statement',createdAt:new Date().toISOString()});}return imported;}
-function commitImport(imported,onlyType){if(!imported.length){toast(onlyType?`No ${onlyType} records found in that file.`:'No valid records found in that file.');return;}const grouped=new Map();for(const record of imported){if(!String(record.notes||'').toLowerCase().includes('imported'))record.notes=[record.notes,'Imported from upload'].filter(Boolean).join(' · ');const party=String(record.party||'').trim(),key=party?`${record.type}|${party.toLowerCase()}`:`unique-${record.id}`;if(!grouped.has(key)){grouped.set(key,record);continue;}const combined=grouped.get(key);combined.amount=Number(combined.amount)+Number(record.amount);combined.paidAmount=Number(combined.paidAmount||0)+Number(record.paidAmount||0);if(record.notes)combined.notes=[combined.notes,record.notes].filter(Boolean).join(' · ');}const consolidated=[...grouped.values()];records.push(...consolidated);save();consolidated.forEach(record=>sync('create',{record}));toast(`${consolidated.length} consolidated record${consolidated.length===1?'':'s'} imported`);}
-async function importRecords(file,onlyType=''){let rows;if(/\.(xlsx|xls)$/i.test(file.name)){if(!window.XLSX){toast('Excel support is loading. Check your internet connection and try again.');return;}const workbook=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});const sheet=workbook.Sheets[workbook.SheetNames[0]];rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',raw:false,dateNF:'yyyy-mm-dd'});}else rows=parseCsv(await file.text());if(rows.length<2){toast('The file has no records to import.');return;}const statementRecords=financialStatementImport(rows,onlyType);if(statementRecords!==null){commitImport(statementRecords,onlyType);return;}const journalRecords=journalSectionImport(rows,onlyType);if(journalRecords!==null){commitImport(journalRecords,onlyType);return;}const headers=rows.shift().map(h=>String(h).trim().toLowerCase());const index=name=>headers.indexOf(name);if(index('type')===-1||index('amount')===-1){toast('Use a SARMART export, a two-column Receivable statement, or a SARMA JOURNALS workbook.');return;}const imported=[];for(const row of rows){const amount=Number(String(row[index('amount')]||'').replace(/[^0-9.-]/g,'')),description=String(row[index('description')]||'').trim(),party=String(row[index('contact')]||'').trim(),notes=String(row[index('notes')]||'').trim(),date=String(row[index('record date')]||'').trim()||today();if(!Number.isFinite(amount))continue;if(/invoice or bill description/i.test(description)&&/customer name|supplier name/i.test(party))continue;const type=importedType(row[index('type')]);if(onlyType&&type!==onlyType)continue;const record={id:crypto.randomUUID(),type,name:description||notes||party||'Imported entry',category:type==='expense'?(row[index('category')]||'Other'):'',party,amount,date,due:row[index('due date')]||'',paidAmount:Number(String(row[index('paid amount')]||0).replace(/[^0-9.-]/g,'')),status:(row[index('status')]||'open').toLowerCase(),notes,createdAt:new Date().toISOString()};if(record.status==='paid')record.paidAmount=Math.abs(amount);imported.push(record);}commitImport(imported,onlyType);}
-async function importRecords(file,onlyType=''){let rows;if(/\.(xlsx|xls)$/i.test(file.name)){if(!window.XLSX){toast('Excel support is loading. Check your internet connection and try again.');return;}const workbook=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});const sheet=workbook.Sheets[workbook.SheetNames[0]];rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',raw:false,dateNF:'yyyy-mm-dd'});}else rows=parseCsv(await file.text());if(rows.length<2){toast('The file has no records to import.');return;}const statementRecords=financialStatementImport(rows,onlyType);if(statementRecords!==null){commitImport(statementRecords,onlyType);return;}const journalRecords=journalSectionImport(rows,onlyType);if(journalRecords!==null){commitImport(journalRecords,onlyType);return;}const headers=rows.shift().map(h=>String(h).trim().toLowerCase()),index=name=>headers.indexOf(name);if(index('type')===-1||index('amount')===-1){toast('Use a SARMART export, a two-column Receivable statement, or a SARMA JOURNALS workbook.');return;}const imported=[];let previousCustomer=null;for(const row of rows){const amount=Number(String(row[index('amount')]||'').replace(/[^0-9.-]/g,'')),description=String(row[index('description')]||'').trim(),party=String(row[index('contact')]||'').trim(),notes=String(row[index('notes')]||'').trim(),date=String(row[index('record date')]||'').trim()||today();if(!Number.isFinite(amount))continue;if(/invoice or bill description/i.test(description)&&/customer name|supplier name/i.test(party))continue;const type=importedType(row[index('type')]);if(onlyType&&type!==onlyType)continue;const detail=[description,notes].filter(Boolean).join(' · ')||`Unlabelled entry (${money.format(amount)})`;if(!party&&previousCustomer&&previousCustomer.type===type){previousCustomer.amount=Number(previousCustomer.amount)+amount;previousCustomer.notes=[previousCustomer.notes,detail].filter(Boolean).join(' · ');continue;}const record={id:crypto.randomUUID(),type,name:description||notes||party||'Imported entry',category:type==='expense'?(row[index('category')]||'Other'):'',party,amount,date,due:row[index('due date')]||'',paidAmount:Number(String(row[index('paid amount')]||0).replace(/[^0-9.-]/g,'')),status:(row[index('status')]||'open').toLowerCase(),notes,createdAt:new Date().toISOString()};if(record.status==='paid')record.paidAmount=Math.abs(amount);imported.push(record);if(party)previousCustomer=record;}commitImport(imported,onlyType);}
-function savedPartyName(value){const typed=String(value||'').trim(),key=typed.toLocaleLowerCase();if(!key)return '';return [...contacts.map(contact=>contact.name),...records.map(record=>record.party)].map(name=>String(name||'').trim()).find(name=>name.toLocaleLowerCase()===key)||typed;}
-$('#record-form').addEventListener('submit',e=>{e.preventDefault();const id=$('#record-id').value,type=$('#record-type').value,amount=Number($('#record-amount').value),status=type==='expense'?'recorded':$('#record-status').value,rawPaid=type==='expense'?0:Number($('#record-paid').value||0),paidAmount=status==='paid'?Math.abs(amount):status==='open'?0:Math.min(Math.abs(rawPaid),Math.abs(amount)),editing=records.find(r=>r.id===id),note=$('#record-notes').value.trim(),color=$('#record-color').value==='#ffffff'?'':$('#record-color').value,date=$('#record-date').value,time=$('#record-time').value,party=savedPartyName($('#record-party').value),samePerson=!id&&type!=='expense'?records.find(r=>r.type===type&&String(r.party||'').trim().toLocaleLowerCase()===party.toLocaleLowerCase()):null,existing=editing||samePerson,enteredBy=existing?.enteredBy||currentUser?.username||currentUser?.label||'Not recorded',history=existing?noteEntries(existing):[],allNotes=existing?[existing.notes,note].filter(Boolean).join(' · '):note;const record={id:existing?.id||crypto.randomUUID(),type,name:existing?.name||$('#record-name').value.trim()||note||party,category:type==='expense'?$('#record-category').value:'',party,amount:samePerson?Number(existing.amount||0)+amount:amount,date:editing?date:(samePerson?existing.date:date),time:editing?time:(samePerson?existing.time:time),due:editing?$('#record-due').value:(samePerson?($('#record-due').value||existing.due):$('#record-due').value),paidAmount:samePerson?Number(existing.paidAmount||0):paidAmount,status,payments:existing?.payments||[],notes:allNotes,noteEntries:note?[...history,{text:note,date,time,enteredBy}]:history,enteredBy,color:color||existing?.color||'',createdAt:existing?.createdAt||new Date().toISOString()};record.status=statusOf(record);if(existing){records=records.map(r=>r.id===record.id?record:r);sync('update',{record});toast(editing?'Record updated':`Added to ${party}`);}else{records.push(record);sync('create',{record});toast(`${typeName(type)} saved`);}$('#record-dialog').close();save();});
-$('#contact-form').addEventListener('submit',e=>{e.preventDefault();const contact={id:crypto.randomUUID(),name:$('#contact-name').value.trim(),type:$('#contact-type').value,phone:$('#contact-phone').value.trim(),email:$('#contact-email').value.trim()};contacts.push(contact);save();sync('createContact',{contact});$('#contact-dialog').close();toast('Contact saved');});
-function compactImage(file){return new Promise((resolve,reject)=>{if(!file)return resolve('');const reader=new FileReader();reader.onerror=()=>reject(new Error('Could not read photo.'));reader.onload=()=>{const image=new Image();image.onerror=()=>reject(new Error('Could not open photo.'));image.onload=()=>{const scale=Math.min(1,420/Math.max(image.width,image.height)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));canvas.getContext('2d').drawImage(image,0,0,canvas.width,canvas.height);let quality=.65,data=canvas.toDataURL('image/jpeg',quality);while(data.length>42000&&quality>.25){quality-=.1;data=canvas.toDataURL('image/jpeg',quality);}resolve(data);};image.src=reader.result;};reader.readAsDataURL(file);});}
-function setPhotoPreview(photo,container,image){$(container).classList.toggle('hidden',!photo);$(image).src=photo||'';}
-$('#stock-photo')?.addEventListener('change',async event=>{try{newStockPhoto=await compactImage(event.target.files[0]);setPhotoPreview(newStockPhoto,'#stock-photo-preview','#stock-photo-preview-image');}catch{toast('Could not use that photo.');}});$('#clear-stock-photo')?.addEventListener('click',()=>{newStockPhoto='';$('#stock-photo').value='';setPhotoPreview('','#stock-photo-preview','#stock-photo-preview-image');});
-$('#stock-form').addEventListener('submit',async e=>{e.preventDefault();const item={id:crypto.randomUUID(),name:$('#stock-name').value.trim(),date:$('#stock-date').value,remaining:$('#stock-remaining').value.trim(),photo:newStockPhoto,replaced:false,replacedDate:'',createdAt:new Date().toISOString()};if(!item.name)return;outOfStock.push(item);$('#stock-form').reset();newStockPhoto='';setPhotoPreview('','#stock-photo-preview','#stock-photo-preview-image');$('#stock-date').value=today();save();syncStock('createStock',item);toast('Out-of-stock item noted');});
-function openStockEdit(id){const item=outOfStock.find(entry=>entry.id===id);if(!item||!isStockManager())return;$('#stock-edit-id').value=item.id;$('#stock-edit-name').value=item.name;$('#stock-edit-date').value=item.date;$('#stock-edit-remaining').value=item.remaining||'';$('#stock-edit-photo').value='';editStockPhoto=item.photo||'';setPhotoPreview(editStockPhoto,'#stock-edit-preview','#stock-edit-preview-image');$('#stock-edit-dialog').showModal();}
-$('#stock-edit-photo').addEventListener('change',async event=>{try{editStockPhoto=await compactImage(event.target.files[0]);setPhotoPreview(editStockPhoto,'#stock-edit-preview','#stock-edit-preview-image');}catch{toast('Could not use that photo.');}});$('#clear-stock-edit-photo').addEventListener('click',()=>{editStockPhoto='';$('#stock-edit-photo').value='';setPhotoPreview('','#stock-edit-preview','#stock-edit-preview-image');});$$('[data-close-stock-edit]').forEach(button=>button.addEventListener('click',()=>$('#stock-edit-dialog').close()));$$('[data-close-stock-photo]').forEach(button=>button.addEventListener('click',()=>$('#stock-photo-dialog').close()));
-$('#stock-edit-form').addEventListener('submit',e=>{e.preventDefault();const id=$('#stock-edit-id').value,item=outOfStock.find(entry=>entry.id===id);if(!item||!isStockManager())return;item.name=$('#stock-edit-name').value.trim();item.date=$('#stock-edit-date').value;item.remaining=$('#stock-edit-remaining').value.trim();item.photo=editStockPhoto;save();syncStock('updateStock',item);$('#stock-edit-dialog').close();toast('Stock entry updated');});
-document.addEventListener('click',event=>{const photoButton=event.target.closest('[data-view-stock-photo]'),editButton=event.target.closest('[data-edit-stock]');if(photoButton){const item=outOfStock.find(entry=>entry.id===photoButton.dataset.viewStockPhoto),photo=safePhoto(item?.photo);if(photo){$('#stock-photo-full').src=photo;$('#stock-photo-dialog').showModal();}}if(editButton)openStockEdit(editButton.dataset.editStock);});
-$('#assistant-login-form').addEventListener('submit',async e=>{e.preventDefault();if(currentUser?.role!=='admin'||!token())return toast('Connect the Google Sheet before creating assistants.');const username=$('#assistant-username').value.trim(),password=$('#assistant-password').value,access=$('#assistant-access').value;if(!username||!password)return;try{const remote=await googleRequest('createUser',{user:{username,password,role:access}}),login={id:remote.id,username:remote.username,access};assistantLogins=assistantLogins.filter(entry=>entry.id!==login.id);assistantLogins.push(login);localStorage.setItem(assistantLoginsKey,JSON.stringify(assistantLogins));$('#assistant-login-form').reset();render();toast(access==='stock'?'Stock Assistant login created':'Assistant login created');}catch(error){toast(error.message||'Could not create assistant login.');}});
-async function remoteLogin(username,password){const response=await fetch(GOOGLE_SCRIPT_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'login',username,password})}),result=await response.json();if(!result.ok)throw Error(result.error||'Incorrect username or password.');return result.data;}
-$('#login-form').addEventListener('submit',async e=>{e.preventDefault();const username=$('#login-username').value.trim(),password=$('#login-password').value,admin=loginAccounts().find(account=>username.toLowerCase()===account.username.toLowerCase()&&password===(localStorage.getItem(`sarmart-password-${account.role}`)||account.password));if(admin){sessionStorage.removeItem(remoteSessionKey);currentUser={role:admin.role,label:admin.label,username:admin.username};sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));$('#login-error').textContent='';updateLogin();return;}try{$('#login-error').textContent='Signing in…';const remote=await remoteLogin(username,password),role=remote.role==='stock'?`stock-assistant-${remote.id}`:`assistant-${remote.id}`;sessionStorage.setItem(remoteSessionKey,JSON.stringify(remote));currentUser={role,label:remote.role==='stock'?'Stock Assistant':'Assistant',username:remote.username,sessionVersion:remote.sessionVersion};sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));$('#login-error').textContent='';updateLogin();}catch(error){$('#login-error').textContent=error.message||'Incorrect username or password.';}});
-function updateLogin(){const signed=!!currentUser,stockOnly=isStockAssistant(),assistantUser=signed&&currentUser?.role!=='admin';$('#login-screen').classList.toggle('hidden',signed);$('#app-shell').classList.toggle('hidden',!signed);$('#app-shell').classList.toggle('stock-only',stockOnly);$('#app-shell').classList.toggle('assistant-user',assistantUser);$$('[data-admin-only]').forEach(el=>el.classList.toggle('hidden',currentUser?.role!=='admin'));$$('[data-stock-manager]').forEach(el=>el.classList.toggle('hidden',!isStockManager()));if(stockOnly)showView('dashboard',false);if(signed){$('#user-chip').textContent=currentUser.label;pullAll();pullAssistantLogins();pullAssistantNotifications();verifyRemoteSession();}render();}
-function setMenuDrawer(open){const shell=$('#app-shell'),toggle=$('#menu-toggle');shell.classList.toggle('menu-open',open);toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',open?'Close main menu':'Open main menu');toggle.textContent=open?'×':'☰';}$$('.nav-link').forEach(btn=>btn.addEventListener('click',()=>{showView(btn.dataset.view);if(window.matchMedia('(max-width: 760px)').matches)setMenuDrawer(false);}));$('.brand').addEventListener('click',event=>{event.preventDefault();showView('dashboard');});$('#menu-toggle').addEventListener('click',()=>setMenuDrawer(!$('#app-shell').classList.contains('menu-open')));$('#menu-backdrop').addEventListener('click',()=>setMenuDrawer(false));window.addEventListener('hashchange',()=>showView(location.hash.slice(1)||'dashboard',false));$$('[data-new]').forEach(btn=>btn.addEventListener('click',()=>openRecord(btn.dataset.new)));$('#add-record').addEventListener('click',()=>$('#entry-choice-dialog').showModal());$$('[data-close-entry-choice]').forEach(button=>button.addEventListener('click',()=>$('#entry-choice-dialog').close()));$$('[data-entry-type]').forEach(button=>button.addEventListener('click',()=>{const type=button.dataset.entryType;$('#entry-choice-dialog').close();openRecord(type);}));$('#add-contact').addEventListener('click',()=>{$('#contact-form').reset();$('#contact-dialog').showModal();});
-$$('[data-close-dialog]').forEach(b=>b.addEventListener('click',()=>$('#record-dialog').close()));$$('[data-close-contact]').forEach(b=>b.addEventListener('click',()=>$('#contact-dialog').close()));$$('[data-close-sheet]').forEach(b=>b.addEventListener('click',()=>$('#sheet-dialog').close()));$$('[data-close-appearance]').forEach(b=>b.addEventListener('click',()=>$('#appearance-dialog').close()));$$('[data-close-payment]').forEach(b=>b.addEventListener('click',()=>$('#payment-dialog').close()));$$('[data-close-delete]').forEach(b=>b.addEventListener('click',()=>$('#delete-dialog').close()));$$('[data-cash-mode]').forEach(button=>button.addEventListener('click',()=>setCashMode(button.dataset.cashMode)));
-$$('[data-close-reset]').forEach(b=>b.addEventListener('click',()=>$('#reset-dialog').close()));$('#forgot-password').addEventListener('click',()=>{$('#reset-form').reset();$('#reset-error').textContent='';$('#reset-dialog').showModal();});$('#reset-form').addEventListener('submit',e=>{e.preventDefault();const username=$('#reset-username').value.trim().toLowerCase(),password=$('#reset-password').value,confirmPassword=$('#reset-confirm').value,match=loginAccounts().find(account=>username===account.username.toLowerCase());if(!match){$('#reset-error').textContent='Enter a registered username.';return;}if(password!==confirmPassword){$('#reset-error').textContent='The passwords do not match.';return;}localStorage.setItem(`sarmart-password-${match.role}`,password);$('#reset-dialog').close();$('#login-username').value=match.username;$('#login-password').value='';$('#login-error').textContent='Password changed. Sign in with your new password.';});
-$$('.dashboard-link').forEach(card=>{card.addEventListener('click',()=>showView(card.dataset.go));card.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();showView(card.dataset.go);}});});
-function openMainEntry(id,type){showView(type==='expense'?'expenses':`${type}s`);setTimeout(()=>{const entry=document.querySelector(`[data-entry-id="${id}"]`);if(!entry)return;entry.scrollIntoView({behavior:'smooth',block:'center'});entry.classList.add('entry-focus');setTimeout(()=>entry.classList.remove('entry-focus'),2200);},180);}
-document.addEventListener('click',event=>{const button=event.target.closest('[data-open-entry]');if(button)openMainEntry(button.dataset.openEntry,button.dataset.openType);});
-document.addEventListener('click',e=>{const id=e.target.dataset.edit||e.target.dataset.delete||e.target.dataset.paid||e.target.dataset.payment;if(!id)return;if(e.target.dataset.edit)editRecord(id);if(e.target.dataset.delete&&currentUser?.role==='admin'){$('#delete-record-id').value=id;$('#delete-dialog').showModal();}if(e.target.dataset.payment&&currentUser?.role==='admin'){const r=records.find(x=>x.id===id);if(r){$('#payment-record-id').value=id;$('#payment-note').value='';setPaymentMode('payment',r);$('#payment-dialog').showModal();}}if(e.target.dataset.paid&&currentUser?.role==='admin'){const r=records.find(x=>x.id===id);if(r){r.paidAmount=r.amount;r.status='paid';save();sync('update',{record:r});toast('Marked as paid');}}});
-document.addEventListener('click',e=>{const button=e.target.closest('[data-stock-replace],[data-stock-out],[data-stock-delete]');if(!button)return;const id=button.dataset.stockReplace||button.dataset.stockOut||button.dataset.stockDelete,item=outOfStock.find(entry=>entry.id===id);if(!item)return;if(button.dataset.stockDelete){if(currentUser?.role!=='admin'||!confirm(`Delete ${item.name} from Out of Stock?`))return;outOfStock=outOfStock.filter(entry=>entry.id!==id);save();syncStock('deleteStock',{id});toast('Out-of-stock item deleted');return;}if(!isStockManager())return;if(button.dataset.stockOut){item.replaced=false;item.replacedDate='';item.date=today();toast('Item marked out of stock again');}else{item.replaced=true;item.replacedDate=today();toast('Item marked as replaced');}save();syncStock('updateStock',item);});
-$$('[data-payment-mode]').forEach(button=>button.addEventListener('click',()=>{const r=records.find(item=>item.id===$('#payment-record-id').value);if(r)setPaymentMode(button.dataset.paymentMode,r);}));$('#payment-form').addEventListener('submit',e=>{e.preventDefault();const id=$('#payment-record-id').value,r=records.find(x=>x.id===id),amount=Number($('#payment-amount').value),mode=$('#payment-mode').value,note=$('#payment-note').value.trim(),time=new Date().toTimeString().slice(0,5),enteredBy=currentUser?.username||currentUser?.label||'Not recorded';if(!r||!Number.isFinite(amount)||(mode==='debt'?amount===0:amount<=0))return;const history=noteEntries(r);if(mode==='debt'){const increasing=amount>0,base=`${r.type==='receivable'?(increasing?'Lending / credit added':'Lending / credit reduced'):(increasing?'Debt increased':'Debt reduced')}: ${money.format(Math.abs(amount))}`,text=note?`${base} — ${note}`:base;r.amount=Number(r.amount)+amount;r.notes=[r.notes,text].filter(Boolean).join(' · ');r.noteEntries=[...history,{text,date:today(),time,enteredBy}];r.status=statusOf(r);save();sync('update',{record:r});$('#payment-dialog').close();toast('Debt balance updated');return;}const actual=amount,overpaid=amount>Math.max(0,outstanding(r)),base=`${r.type==='receivable'?'Payment received':'Payment made'}: ${money.format(actual)}${overpaid?' (includes overpayment)':''}`,text=note?`${base} — ${note}`:base;r.payments=paymentEntries(r);r.payments.push({amount:actual,date:today(),time});r.paidAmount=paid(r)+actual;r.notes=[r.notes,text].filter(Boolean).join(' · ');r.noteEntries=[...history,{text,date:today(),time,enteredBy}];r.status=statusOf(r);save();sync('update',{record:r});$('#payment-dialog').close();toast(overpaid?'Overpayment saved':'Payment recorded as cash movement');});
-$('#delete-form').addEventListener('submit',e=>{e.preventDefault();const id=$('#delete-record-id').value;if(id){pendingDeletes.add(id);records=records.filter(r=>r.id!==id);save();syncPendingDeletes();toast('Record deleted');}$('#delete-dialog').close();});
-$$('.search-input,.filter-select').forEach(input=>input.addEventListener('input',render));$('[data-category-filter]').innerHTML='<option value="">All categories</option>'+categories.map(c=>`<option>${c}</option>`).join('');$$('[data-status-filter]').forEach(select=>{if(!select.querySelector('[value="overpaid"]'))select.insertAdjacentHTML('beforeend','<option value="overpaid">Overpaid</option>');});$$('[data-export]').forEach(b=>b.addEventListener('click',()=>exportCsv(b.dataset.export)));$('#export-report').addEventListener('click',()=>exportCsv('report'));$('#print-report').addEventListener('click',()=>window.print());
-$$('[data-delete-imported]').forEach(button=>button.addEventListener('click',()=>{const view=button.closest('.view')?.id||'',type=view==='receivables'?'receivable':'payable',tagged=records.filter(record=>record.type===type&&String(record.notes||'').toLowerCase().includes('imported')),targets=tagged.length?tagged:records.filter(record=>record.type===type);if(!targets.length){toast(`There are no ${type} entries to delete.`);return;}const message=tagged.length?`Delete all ${tagged.length} imported ${type} entries? This cannot be undone.`:`Older uploads were not tagged. Delete all ${targets.length} ${type} entries currently listed? This cannot be undone.`;if(!confirm(message))return;const ids=new Set(targets.map(record=>record.id));targets.forEach(record=>pendingDeletes.add(record.id));records=records.filter(record=>!ids.has(record.id));save();syncPendingDeletes();toast(`${targets.length} ${type} entries deleted`);}));
-$$('[data-template]').forEach(button=>button.addEventListener('click',()=>downloadTemplate(button.dataset.template)));
-$('#import-records').addEventListener('click',()=>{ $('#import-file').dataset.type=''; $('#import-file').click(); });$$('[data-import-type]').forEach(button=>button.addEventListener('click',()=>{ $('#import-file').dataset.type=button.dataset.importType; $('#import-file').click(); }));$('#import-file').addEventListener('change',event=>{const file=event.target.files[0];if(file)importRecords(file,event.target.dataset.type||'');event.target.value='';});
-$('#sign-out').addEventListener('click',()=>{sessionStorage.removeItem(sessionKey);currentUser=null;$('#login-form').reset();updateLogin();});$('#logout-other-devices').addEventListener('click',async()=>{if(currentUser?.role!=='admin'||!token())return toast('Connect Google Sheet before logging out other devices.');if(!confirm('Log out every other device signed in to this business?'))return;try{const session=await googleRequest('logoutOtherDevices');currentUser.sessionVersion=String(session.version);sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));toast('Other devices will be logged out shortly.');}catch{toast('Could not log out other devices. Check the Sheet connection.');}});$('#sheet-settings').addEventListener('click',()=>{$('#sheet-token').value=token();$('#sheet-error').textContent='';$('#sheet-dialog').showModal();});$('#sheet-form').addEventListener('submit',async e=>{e.preventDefault();localStorage.setItem(googleTokenKey,$('#sheet-token').value.trim());const result=await pullAll();if(result.ok){$('#sheet-dialog').close();verifyRemoteSession();toast('Google Sheet connected');}else $('#sheet-error').textContent=`Could not connect: ${result.message}`;});$('#appearance-settings').addEventListener('click',()=>{const settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system'});$('#appearance-size').value=settings.size||'15px';$('#appearance-font').value=settings.font||'system';$('#appearance-dialog').showModal();});$('#appearance-form').addEventListener('submit',event=>{event.preventDefault();const settings={size:$('#appearance-size').value,font:$('#appearance-font').value};localStorage.setItem(appearanceKey,JSON.stringify(settings));applyAppearance(settings);$('#appearance-dialog').close();toast('Text appearance saved');});
-const compactNote=$('#record-notes'),noteWrap=document.createElement('div'),expandedNote=document.createElement('textarea'),noteToggle=document.createElement('button');noteWrap.className='note-input-wrap';expandedNote.id='record-notes';expandedNote.placeholder=compactNote.placeholder;expandedNote.rows=1;noteToggle.type='button';noteToggle.className='note-toggle';noteToggle.textContent='⌄';noteToggle.title='Show full note';noteToggle.addEventListener('click',()=>{const open=noteWrap.classList.toggle('expanded');noteToggle.textContent=open?'⌃':'⌄';noteToggle.title=open?'Hide full note':'Show full note';});compactNote.replaceWith(noteWrap);noteWrap.append(expandedNote,noteToggle);
-const colorLabel=document.createElement('label'),recordColor=document.createElement('input'),originalOpenRecord=openRecord;colorLabel.className='color-field';colorLabel.append('Highlight colour (optional)');recordColor.id='record-color';recordColor.type='color';recordColor.value='#ffffff';colorLabel.append(recordColor);$('#record-form .modal-actions').before(colorLabel);openRecord=(type,id='')=>{originalOpenRecord(type,id);const record=id?records.find(item=>item.id===id):null;$('#record-color').value=/^#[0-9a-f]{6}$/i.test(record?.color||'')?record.color:'#ffffff';if(record){$('#record-notes').value='';$('#record-notes').placeholder='Add another note (earlier notes stay saved)';}else $('#record-notes').placeholder='e.g. Sales for the day';};
-['expense','receivable','payable'].forEach(type=>{const view=type==='expense'?'expenses':`${type}s`,bar=$(`#${view} .filter-bar`),from=document.createElement('input'),to=document.createElement('input');from.type=to.type='date';from.dataset.dateFrom=type;to.dataset.dateTo=type;from.title='From date';to.title='To date';from.setAttribute('aria-label','From date');to.setAttribute('aria-label','To date');from.addEventListener('input',render);to.addEventListener('input',render);bar.append(from,to);});
-['expense','receivable','payable'].forEach(type=>{const view=type==='expense'?'expenses':`${type}s`,bar=$(`#${view} .filter-bar`),min=document.createElement('input'),max=document.createElement('input'),sort=document.createElement('select');min.type=max.type='number';min.step=max.step='any';min.min=max.min='0';min.placeholder='Min total';max.placeholder='Max total';min.dataset.minTotal=type;max.dataset.maxTotal=type;sort.dataset.sort=type;sort.innerHTML='<option value="newest">Newest first</option><option value="a-z">Name A–Z</option><option value="z-a">Name Z–A</option><option value="high-low">Total high–low</option><option value="low-high">Total low–high</option>';[min,max,sort].forEach(control=>{control.className='filter-select';control.addEventListener('input',render);control.addEventListener('change',render);});bar.append(min,max,sort);});
-let colourPressTimer;function openEntryColour(id){const record=records.find(item=>item.id===id);if(!record)return;const picker=document.createElement('input');picker.type='color';picker.value=/^#[0-9a-f]{6}$/i.test(record.color||'')?record.color:'#176b29';picker.className='quick-colour-picker';picker.addEventListener('input',()=>{record.color=picker.value;save();sync('update',{record},true);});picker.addEventListener('change',()=>picker.remove());document.body.append(picker);picker.click();toast('Choose a highlight colour');}document.addEventListener('pointerdown',event=>{const entry=event.target.closest('[data-color-record]');if(!entry||event.target.closest('button,summary,input')||currentUser?.role!=='admin')return;colourPressTimer=setTimeout(()=>openEntryColour(entry.dataset.colorRecord),2000);});['pointerup','pointercancel','pointermove'].forEach(name=>document.addEventListener(name,()=>{clearTimeout(colourPressTimer);}));
-$('#undo-action').addEventListener('click',undo);$('#redo-action').addEventListener('click',redo);$('#top-action').addEventListener('click',()=>window.scrollTo({top:0,behavior:'smooth'}));$('#bottom-action').addEventListener('click',()=>window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'}));function moveAccountControls(){const target=$('#account-controls');if(!target)return;['#sheet-settings','#logout-other-devices','#sign-out'].forEach(selector=>{const control=$(selector);if(control)target.append(control);});}moveAccountControls();applyAppearance();$('#today').textContent=new Date().toLocaleDateString('en-KE',{weekday:'long',day:'numeric',month:'long',year:'numeric'});$('#stock-date').value=today();updateHistoryButtons();updateLogin();showView(location.hash.slice(1)||'dashboard',false);setInterval(()=>{if(currentUser&&token()){syncPendingDeletes();pullAll(true);verifyRemoteSession();}},10000);if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
-$$('#record-amount,#record-paid,#payment-amount').forEach(input=>{const move=direction=>{const value=Number(input.value||0),step=Math.abs(value)>100?100:1;input.value=value+(direction*step);input.dispatchEvent(new Event('input',{bubbles:true}));};input.addEventListener('keydown',event=>{if(event.key==='ArrowUp'||event.key==='ArrowDown'){event.preventDefault();move(event.key==='ArrowUp'?1:-1);}});input.addEventListener('pointerdown',event=>{const box=input.getBoundingClientRect();if(event.clientX>box.right-32){event.preventDefault();move(event.clientY<box.top+(box.height/2)?1:-1);}});});
+const storageKey = 'sarmart-records-v2',
+      contactsKey = 'sarmart-contacts-v1',
+      stockKey = 'sarmart-out-of-stock-v1',
+      stockPendingKey = 'sarmart-stock-pending-v1',
+      assistantLoginsKey = 'sarmart-assistant-logins-v1',
+      reconciliationKey = 'sarmart-reconciliation-v1',
+      sessionKey = 'sarmart-current-user',
+      remoteSessionKey = 'sarmart-remote-user-session',
+      googleTokenKey = 'sarmart-google-sheet-token',
+      appearanceKey = 'sarmart-appearance-v1',
+      deletedKey = 'sarmart-pending-deletes-v1',
+      pendingWritesKey = 'sarmart-pending-writes-v1';
 
-['#recon-sales','#recon-purchases','#recon-profit'].forEach(selector=>$(selector)?.addEventListener('input',updateReconciliationStatus));
-$('#recon-date')?.addEventListener('change',renderReconciliation);
-$('#save-reconciliation')?.addEventListener('click',()=>{const sales=Number($('#recon-sales').value||0),purchases=Number($('#recon-purchases').value||0),profit=Number($('#recon-profit').value||0),date=$('#recon-date')?.value||today();reconciliation={date,sales,purchases,profit,updatedAt:new Date().toISOString(),updatedBy:currentUser?.username||currentUser?.label||'Not recorded'};localStorage.setItem(reconciliationKey,JSON.stringify(reconciliation));renderReconciliation();toast('Reconciliation saved');});
+const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxXgbQjKl8EndI1uHFjRdjg6r5p13DtJRSQfuUafz6VcnksroKjxXnYR7sIEGCb-OqQRw/exec';
+const accounts = { admin: { username: 'sam', password: '123', label: 'Administrator' } };
+const categories = ['Inventory / stock', 'Rent', 'Utilities', 'Phone & internet', 'Transport', 'Salaries & wages', 'Marketing', 'Office supplies', 'Repairs & maintenance', 'Professional services', 'Taxes & licences', 'Other'];
 
-// Keep filtering resilient when older records store notes as a separate history array.
-function filtered(type){let out=records.filter(r=>r.type===type);const search=$(`[data-filter="${type}"]`)?.value.trim().toLowerCase()||'',status=$(`[data-status-filter="${type}"]`)?.value||'',category=$('[data-category-filter]')?.value||'',from=$(`[data-date-from="${type}"]`)?.value||'',to=$(`[data-date-to="${type}"]`)?.value||'',min=$(`[data-min-total="${type}"]`)?.value,max=$(`[data-max-total="${type}"]`)?.value,sort=$(`[data-sort="${type}"]`)?.value||'newest';if(search)out=out.filter(r=>`${r.name} ${r.party} ${r.category} ${r.notes} ${noteEntries(r).map(entry=>entry.text).join(' ')}`.toLowerCase().includes(search));if(status)out=out.filter(r=>statusOf(r)===status);if(category)out=out.filter(r=>r.category===category);if(from)out=out.filter(r=>String(r.createdAt||r.date||'').slice(0,10)>=from);if(to)out=out.filter(r=>String(r.createdAt||r.date||'').slice(0,10)<=to);if(min!=='')out=out.filter(r=>Math.abs(Number(r.amount||0))>=Number(min));if(max!=='')out=out.filter(r=>Math.abs(Number(r.amount||0))<=Number(max));const label=r=>String(r.party||r.name||'').toLowerCase();return out.sort((a,b)=>sort==='a-z'?label(a).localeCompare(label(b)):sort==='z-a'?label(b).localeCompare(label(a)):sort==='high-low'?Math.abs(Number(b.amount||0))-Math.abs(Number(a.amount||0)):sort==='low-high'?Math.abs(Number(a.amount||0))-Math.abs(Number(b.amount||0)):`${b.date||''}${b.createdAt||b.id||''}`.localeCompare(`${a.date||''}${a.createdAt||a.id||''}`));}
+const readJson = (storage, key, fallback) => {
+  try {
+    const value = JSON.parse(storage.getItem(key) || 'null');
+    return value ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
 
-// A negative payment is a correction: it reduces a previously recorded payment.
-$('#payment-form').addEventListener('submit',event=>{const amount=Number($('#payment-amount').value),mode=$('#payment-mode').value;if(mode!=='payment'||!Number.isFinite(amount)||amount>=0)return;event.preventDefault();event.stopImmediatePropagation();const r=records.find(item=>item.id===$('#payment-record-id').value),correction=Math.min(paid(r||{}),Math.abs(amount));if(!r||correction<=0)return toast('There is no recorded payment to reduce.');const note=$('#payment-note').value.trim(),time=new Date().toTimeString().slice(0,5),enteredBy=currentUser?.username||currentUser?.label||'Not recorded',base=`Payment correction: -${money.format(correction)}`,text=note?`${base} — ${note}`:base;r.payments=paymentEntries(r);r.payments.push({amount:-correction,date:today(),time});r.paidAmount=paid(r)-correction;r.notes=[r.notes,text].filter(Boolean).join(' · ');r.noteEntries=[...noteEntries(r),{text,date:today(),time,enteredBy}];r.status=statusOf(r);save();sync('update',{record:r});$('#payment-dialog').close();toast('Payment correction saved');},true);
+let records = readJson(localStorage, storageKey, []),
+    contacts = readJson(localStorage, contactsKey, []),
+    outOfStock = readJson(localStorage, stockKey, []),
+    assistantLogins = readJson(localStorage, assistantLoginsKey, []),
+    reconciliation = readJson(localStorage, reconciliationKey, {}),
+    currentUser = readJson(sessionStorage, sessionKey, null),
+    pendingDeletes = new Set(readJson(localStorage, deletedKey, [])),
+    pendingWrites = new Set(readJson(localStorage, pendingWritesKey, [])),
+    pendingStockWrites = new Set(readJson(localStorage, stockPendingKey, [])),
+    notificationFeed = [],
+    cashMode = 'out',
+    undoHistory = [],
+    redoHistory = [],
+    newStockPhoto = '',
+    editStockPhoto = '';
+
+const $ = s => document.querySelector(s),
+      $$ = s => [...document.querySelectorAll(s)];
+
+function applyAppearance(settings = readJson(localStorage, appearanceKey, { size: '15px', font: 'system' })) {
+  const fonts = {
+    system: 'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',
+    arial: 'Arial,Helvetica,sans-serif',
+    verdana: 'Verdana,Geneva,sans-serif',
+    serif: 'Georgia,serif'
+  };
+  const size = settings.size || '15px',
+        font = fonts[settings.font] || fonts.system;
+  document.documentElement.style.setProperty('--user-font-size', size);
+  document.documentElement.style.setProperty('--user-font-family', font);
+  document.body?.style.setProperty('font-size', size, 'important');
+  document.body?.style.setProperty('font-family', font, 'important');
+}
+
+document.addEventListener('click', event => {
+  if (event.target.closest('#stock-sign-out')) $('#sign-out').click();
+  if (event.target.closest('#sign-out')) sessionStorage.removeItem(remoteSessionKey);
+});
+
+document.addEventListener('click', event => {
+  const edit = event.target.closest('[data-edit]'),
+        remove = event.target.closest('[data-delete],[data-delete-imported]');
+  if (remove && currentUser?.role !== 'admin') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
+  if (edit && currentUser?.role !== 'admin') {
+    const record = records.find(item => item.id === edit.dataset.edit),
+          role = String(currentUser?.role || ''),
+          normalAssistant = role === 'assistant' || role.startsWith('assistant-');
+    if (!normalAssistant || !record || record.type === 'expense') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }
+}, true);
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-payment]'),
+        role = String(currentUser?.role || ''),
+        normalAssistant = role === 'assistant' || role.startsWith('assistant-');
+  if (!button || !normalAssistant) return;
+  const record = records.find(item => item.id === button.dataset.payment);
+  if (!record) return;
+  $('#payment-record-id').value = record.id;
+  $('#payment-note').value = '';
+  setPaymentMode('payment', record);
+  $('#payment-dialog').showModal();
+});
+
+const deleteAllStockButton = document.createElement('button');
+deleteAllStockButton.id = 'delete-all-stock';
+deleteAllStockButton.type = 'button';
+deleteAllStockButton.className = 'delete-btn hidden';
+deleteAllStockButton.textContent = 'Delete all out-of-stock items';
+$('#out-of-stock-list')?.before(deleteAllStockButton);
+
+const notificationPanel = document.createElement('section');
+notificationPanel.id = 'assistant-notifications';
+notificationPanel.className = 'panel hidden';
+notificationPanel.innerHTML = '<div class="panel-head"><div><h2>Assistant notifications</h2><p>Recent changes made by assistants.</p></div></div><div id="assistant-notification-list"></div>';
+$('#dashboard')?.append(notificationPanel);
+
+const enableAlertsButton = document.createElement('button');
+enableAlertsButton.id = 'enable-phone-alerts';
+enableAlertsButton.type = 'button';
+enableAlertsButton.className = 'secondary-btn sign-out';
+enableAlertsButton.textContent = 'Enable phone alerts';
+$('#account-controls')?.prepend(enableAlertsButton);
+
+enableAlertsButton.addEventListener('click', async () => {
+  if (!('Notification' in window)) return toast('Phone alerts are not supported by this browser.');
+  const permission = await Notification.requestPermission();
+  toast(permission === 'granted' ? 'Phone alerts enabled' : 'Phone alerts were not enabled.');
+});
+
+document.addEventListener('click', async event => {
+  const stockButton = event.target.closest('#delete-all-stock'),
+        assistantButton = event.target.closest('[data-delete-assistant]');
+  if (stockButton) {
+    if (currentUser?.role !== 'admin' || !confirm('Delete every Out-of-Stock item? This cannot be undone.')) return;
+    try {
+      await googleRequest('deleteAllStock');
+      outOfStock = [];
+      pendingStockWrites.clear();
+      localStorage.setItem(stockPendingKey, '[]');
+      save();
+      toast('All Out-of-Stock items deleted');
+    } catch {
+      toast('Could not delete items. Check Google Sheet sync.');
+    }
+    return;
+  }
+  if (assistantButton) {
+    const id = assistantButton.dataset.deleteAssistant,
+          login = assistantLogins.find(item => item.id === id);
+    if (currentUser?.role !== 'admin' || !login || !confirm(`Delete login for ${login.username}? They will be signed out.`)) return;
+    try {
+      await googleRequest('deleteUser', { id });
+      assistantLogins = assistantLogins.filter(item => item.id !== id);
+      localStorage.setItem(assistantLoginsKey, JSON.stringify(assistantLogins));
+      renderAssistantLogins();
+      toast('Assistant login deleted');
+    } catch {
+      toast('Could not delete assistant login.');
+    }
+  }
+});
+
+setInterval(() => {
+  if (currentUser && canSync()) {
+    syncPendingWrites();
+    syncPendingStockWrites();
+  }
+}, 10000);
+
+setInterval(() => {
+  enableAlertsButton.classList.toggle('hidden', currentUser?.role !== 'admin');
+  if (currentUser?.role === 'admin' && token()) pullAssistantNotifications();
+}, 15000);
+
+setInterval(() => {
+  if (currentUser?.role !== 'admin' && canSync()) {
+    syncPendingDeletes();
+    pullAll(true);
+    verifyRemoteSession();
+  }
+}, 10000);
+
+const isStockManager = () => !!currentUser;
+const isStockAssistant = () => String(currentUser?.role || '').startsWith('stock-assistant-');
+const loginAccounts = () => [{ role: 'admin', ...accounts.admin }];
+const money = new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 });
+const today = () => new Date().toISOString().slice(0, 10);
+const dateText = value => value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-KE', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
+const typeName = type => type === 'receivable' ? 'Receivable' : type === 'payable' ? 'Payable' : 'Expense / Cash Out';
+const isDue = (r, days = 0) => r.due && r.due <= new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+
+function paid(r) { return Math.abs(Number(r.paidAmount || 0)); }
+function outstanding(r) { const amount = Number(r.amount || 0); return amount >= 0 ? amount - paid(r) : amount + paid(r); }
+function statusOf(r) {
+  if (r.type === 'expense') return 'recorded';
+  if (outstanding(r) < -0.001) return 'overpaid';
+  if (Math.abs(outstanding(r)) < 0.001) return 'paid';
+  if (paid(r) > 0) return 'part-paid';
+  return isDue(r, -1) ? 'overdue' : 'open';
+}
+
+function paymentEntries(r) {
+  let entries = r.payments;
+  if (typeof entries === 'string') {
+    try { entries = JSON.parse(entries); } catch { entries = []; }
+  }
+  return Array.isArray(entries) && entries.length ? entries : (paid(r) ? [{ amount: paid(r), date: r.lastPaymentDate || r.date }] : []);
+}
+
+function paymentsThisMonth(r) {
+  const now = new Date();
+  return paymentEntries(r).filter(p => {
+    const d = new Date(`${p.date}T00:00:00`);
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  }).reduce((sum, p) => sum + Number(p.amount || 0), 0);
+}
+
+function noteEntries(r) {
+  let entries = r.noteEntries;
+  if (typeof entries === 'string') {
+    try { entries = JSON.parse(entries); } catch { entries = []; }
+  }
+  if (Array.isArray(entries) && entries.length) return entries;
+  return String(r.notes || '').split(' · ').filter(Boolean).map(text => ({ text, date: r.date, time: r.time, enteredBy: r.enteredBy || 'Imported record' }));
+}
+
+function noteMeta(entry, r) {
+  const date = entry.date || r.date,
+        time = entry.time || r.time || '—',
+        person = entry.enteredBy || r.enteredBy || 'Imported record',
+        day = date ? new Date(`${date}T00:00:00`).toLocaleDateString('en-KE', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' }) : 'Date not recorded';
+  return `${day} · ${time} · Entered by ${person}`;
+}
+
+function stateSnapshot() { return JSON.stringify({ records, contacts }); }
+let historyBaseline = stateSnapshot();
+
+function updateHistoryButtons() {
+  if ($('#undo-action')) $('#undo-action').disabled = !undoHistory.length;
+  if ($('#redo-action')) $('#redo-action').disabled = !redoHistory.length;
+}
+
+function save(track = true) {
+  const current = stateSnapshot();
+  if (track && current !== historyBaseline) {
+    undoHistory.push(historyBaseline);
+    if (undoHistory.length > 30) undoHistory.shift();
+    redoHistory = [];
+  }
+  historyBaseline = current;
+  localStorage.setItem(storageKey, JSON.stringify(records));
+  localStorage.setItem(contactsKey, JSON.stringify(contacts));
+  localStorage.setItem(stockKey, JSON.stringify(outOfStock));
+  localStorage.setItem(deletedKey, JSON.stringify([...pendingDeletes]));
+  localStorage.setItem(pendingWritesKey, JSON.stringify([...pendingWrites]));
+  localStorage.setItem(stockPendingKey, JSON.stringify([...pendingStockWrites]));
+  render();
+  updateHistoryButtons();
+}
+
+function restoreHistory(target) {
+  const before = JSON.parse(historyBaseline),
+        after = JSON.parse(target),
+        beforeMap = new Map(before.records.map(r => [r.id, r])),
+        afterMap = new Map(after.records.map(r => [r.id, r]));
+  records = after.records;
+  contacts = after.contacts;
+  for (const [id, record] of afterMap) {
+    if (!beforeMap.has(id)) {
+      pendingDeletes.delete(id);
+      sync('create', { record }, true);
+    } else if (JSON.stringify(record) !== JSON.stringify(beforeMap.get(id))) {
+      sync('update', { record }, true);
+    }
+  }
+  for (const id of beforeMap.keys()) if (!afterMap.has(id)) pendingDeletes.add(id);
+  historyBaseline = target;
+  save(false);
+  syncPendingDeletes();
+}
+
+function undo() {
+  if (!undoHistory.length) return;
+  const target = undoHistory.pop();
+  redoHistory.push(historyBaseline);
+  restoreHistory(target);
+  toast('Last change undone');
+}
+
+function redo() {
+  if (!redoHistory.length) return;
+  const target = redoHistory.pop();
+  undoHistory.push(historyBaseline);
+  restoreHistory(target);
+  toast('Change redone');
+}
+
+function token() { return localStorage.getItem(googleTokenKey) || ''; }
+function remoteSession() { return readJson(sessionStorage, remoteSessionKey, null); }
+function canSync() { return currentUser?.role === 'admin' ? !!token() : !!remoteSession()?.session; }
+function setSync(text, on = false) {
+  if ($('#sync-status')) {
+    $('#sync-status').textContent = text;
+    $('#sync-status').classList.toggle('connected', on);
+  }
+}
+
+async function googleRequest(action, payload = {}) {
+  const admin = currentUser?.role === 'admin',
+        credential = admin ? token() : remoteSession()?.session;
+  if (!credential) throw Error(admin ? 'Enter the private API token.' : 'Sign in again to connect.');
+  const isList = ['list', 'listContacts', 'listStock', 'getSessionVersion', 'listUsers', 'listNotifications'].includes(action),
+        key = admin ? 'token' : 'session',
+        url = isList ? `${GOOGLE_SCRIPT_URL}?${key}=${encodeURIComponent(credential)}&action=${action}` : GOOGLE_SCRIPT_URL,
+        body = admin ? { token: credential, action, ...payload } : { session: credential, action, ...payload },
+        options = isList ? {} : { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) };
+  const response = await fetch(url, options);
+  const result = await response.json();
+  if (!result.ok) throw Error(result.error || 'Google Sheet request failed.');
+  return result.data;
+}
+
+function fingerprint(items) {
+  return JSON.stringify(items.map(item => Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {})).sort((a, b) => String(a.id).localeCompare(String(b.id))));
+}
+
+async function pullAll(quiet = false) {
+  if (!canSync()) return { ok: false, message: currentUser?.role === 'admin' ? 'Enter the private API token first.' : 'Sign in again to connect.' };
+  if (!quiet) setSync('Syncing…');
+  try {
+    const cloud = await googleRequest('list');
+    const parseList = value => {
+      if (typeof value !== 'string') return value || [];
+      try { return JSON.parse(value) || []; } catch { return []; }
+    };
+    const remote = cloud.map(r => ({ ...r, amount: Number(r.amount), paidAmount: Number(r.paidAmount || 0), payments: parseList(r.payments), noteEntries: parseList(r.noteEntries) })).filter(r => !pendingDeletes.has(r.id));
+    const localPending = records.filter(r => pendingWrites.has(r.id));
+    const nextRecords = [...remote.filter(r => !pendingWrites.has(r.id)), ...localPending];
+    let nextContacts = contacts, nextStock = outOfStock;
+    try { nextContacts = await googleRequest('listContacts'); } catch {}
+    try {
+      const remoteStock = await googleRequest('listStock'),
+            localStock = new Map(outOfStock.map(item => [item.id, item])),
+            completeStock = remoteStock.map(item => {
+              const local = localStock.get(item.id);
+              return { ...item, remaining: item.remaining !== undefined ? item.remaining : (local?.remaining || ''), photo: item.photo !== undefined ? item.photo : (local?.photo || '') };
+            });
+      nextStock = [...completeStock.filter(item => !pendingStockWrites.has(item.id)), ...outOfStock.filter(item => pendingStockWrites.has(item.id))];
+    } catch {}
+    const changed = fingerprint(records) !== fingerprint(nextRecords) || fingerprint(contacts) !== fingerprint(nextContacts) || fingerprint(outOfStock) !== fingerprint(nextStock);
+    if (changed && !$('#record-dialog')?.open && !$('#contact-dialog')?.open) {
+      records = nextRecords;
+      contacts = nextContacts;
+      outOfStock = nextStock;
+      historyBaseline = stateSnapshot();
+      localStorage.setItem(storageKey, JSON.stringify(records));
+      localStorage.setItem(contactsKey, JSON.stringify(contacts));
+      localStorage.setItem(stockKey, JSON.stringify(outOfStock));
+      render();
+      updateHistoryButtons();
+    }
+    if (!quiet) setSync('Google Sheet synced', true);
+    return { ok: true };
+  } catch (error) {
+    if (!quiet) setSync('Sheet unavailable');
+    return { ok: false, message: error.message || 'Browser could not reach Google Sheets.' };
+  }
+}
+
+async function sync(action, payload, quiet = false) {
+  const recordId = payload?.record?.id;
+  if (recordId) {
+    pendingWrites.add(recordId);
+    localStorage.setItem(pendingWritesKey, JSON.stringify([...pendingWrites]));
+  }
+  if (!canSync()) return false;
+  try {
+    await googleRequest(action, payload);
+    if (recordId) {
+      pendingWrites.delete(recordId);
+      localStorage.setItem(pendingWritesKey, JSON.stringify([...pendingWrites]));
+    }
+    setSync('Google Sheet synced', true);
+    setTimeout(() => pullAll(true), 0);
+    return true;
+  } catch {
+    setSync('Saved on this device');
+    if (!quiet) toast('Saved locally. Sheet sync will retry.');
+    return false;
+  }
+}
+
+async function syncStock(action, item) {
+  pendingStockWrites.add(item.id);
+  localStorage.setItem(stockPendingKey, JSON.stringify([...pendingStockWrites]));
+  if (!canSync()) return false;
+  try {
+    await googleRequest(action, { item });
+    pendingStockWrites.delete(item.id);
+    localStorage.setItem(stockPendingKey, JSON.stringify([...pendingStockWrites]));
+    setSync('Google Sheet synced', true);
+    setTimeout(() => pullAll(true), 0);
+    return true;
+  } catch {
+    setSync('Saved on this device');
+    toast('Saved on this device.');
+    return false;
+  }
+}
+
+async function syncPendingWrites() {
+  if (!canSync()) return;
+  for (const id of [...pendingWrites]) {
+    const record = records.find(item => item.id === id);
+    if (!record) {
+      pendingWrites.delete(id);
+      continue;
+    }
+    try {
+      await googleRequest('update', { record });
+    } catch {
+      try { await googleRequest('create', { record }); } catch { continue; }
+    }
+    pendingWrites.delete(id);
+    localStorage.setItem(pendingWritesKey, JSON.stringify([...pendingWrites]));
+  }
+  if (!pendingWrites.size) pullAll(true);
+}
+
+async function syncPendingStockWrites() {
+  if (!canSync()) return;
+  for (const id of [...pendingStockWrites]) {
+    const item = outOfStock.find(entry => entry.id === id);
+    if (!item) {
+      pendingStockWrites.delete(id);
+      continue;
+    }
+    try {
+      await googleRequest('updateStock', { item });
+    } catch {
+      try { await googleRequest('createStock', { item }); } catch { continue; }
+    }
+    pendingStockWrites.delete(id);
+    localStorage.setItem(stockPendingKey, JSON.stringify([...pendingStockWrites]));
+  }
+  if (!pendingStockWrites.size) pullAll(true);
+}
+
+async function syncPendingDeletes() {
+  for (const id of [...pendingDeletes]) {
+    if (await sync('delete', { id }, true)) {
+      pendingDeletes.delete(id);
+      save();
+    }
+  }
+}
+
+async function verifyRemoteSession() {
+  if (!currentUser || !canSync()) return;
+  try {
+    const session = await googleRequest('getSessionVersion'),
+          version = String(session.version || '1');
+    if (!currentUser.sessionVersion) {
+      currentUser.sessionVersion = version;
+      sessionStorage.setItem(sessionKey, JSON.stringify(currentUser));
+      return;
+    }
+    if (currentUser.sessionVersion !== version) {
+      sessionStorage.removeItem(sessionKey);
+      sessionStorage.removeItem(remoteSessionKey);
+      currentUser = null;
+      $('#login-form')?.reset();
+      updateLogin();
+      toast('You were signed out by the Administrator.');
+    }
+  } catch {}
+}
+
+function toast(text) {
+  const el = $('#toast');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.add('show-toast');
+  setTimeout(() => el.classList.remove('show-toast'), 2600);
+}
+
+function monthRecord(r) {
+  const d = new Date(`${r.date}T00:00:00`), n = new Date();
+  return d.getMonth() === n.getMonth() && d.getFullYear() === n.getFullYear();
+}
+
+function filtered(type) {
+  let out = records.filter(r => r.type === type);
+  const search = $(`[data-filter="${type}"]`)?.value.trim().toLowerCase() || '';
+  const status = $(`[data-status-filter="${type}"]`)?.value || '';
+  const category = $('[data-category-filter]')?.value || '',
+        from = $(`[data-date-from="${type}"]`)?.value || '',
+        to = $(`[data-date-to="${type}"]`)?.value || '',
+        min = $(`[data-min-total="${type}"]`)?.value,
+        max = $(`[data-max-total="${type}"]`)?.value,
+        sort = $(`[data-sort="${type}"]`)?.value || 'newest';
+  if (search) out = out.filter(r => `${r.name} ${r.party} ${r.category} ${r.notes}`.toLowerCase().includes(search));
+  if (status) out = out.filter(r => statusOf(r) === status);
+  if (category) out = out.filter(r => r.category === category);
+  if (from) out = out.filter(r => String(r.createdAt || r.date || '').slice(0, 10) >= from);
+  if (to) out = out.filter(r => String(r.createdAt || r.date || '').slice(0, 10) <= to);
+  if (min !== '' && min !== undefined) out = out.filter(r => Math.abs(Number(r.amount || 0)) >= Number(min));
+  if (max !== '' && max !== undefined) out = out.filter(r => Math.abs(Number(r.amount || 0)) <= Number(max));
+  const label = r => String(r.party || r.name || '').toLowerCase();
+  return out.sort((a, b) => sort === 'a-z' ? label(a).localeCompare(label(b)) : sort === 'z-a' ? label(b).localeCompare(label(a)) : sort === 'high-low' ? Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0)) : sort === 'low-high' ? Math.abs(Number(a.amount || 0)) - Math.abs(Number(b.amount || 0)) : `${b.date || ''}${b.createdAt || b.id || ''}`.localeCompare(`${a.date || ''}${a.createdAt || a.id || ''}`));
+}
+
+function actions(r) {
+  const admin = currentUser?.role === 'admin',
+        role = String(currentUser?.role || ''),
+        assistant = role === 'assistant' || role.startsWith('assistant-'),
+        payButton = statusOf(r) !== 'paid' && outstanding(r) > 0 ? `<button class="account-icon pay-icon" data-payment="${r.id}" title="Record payment" aria-label="Record payment">✓</button>` : '';
+  if (!admin) return assistant && r.type !== 'expense' ? `${payButton}<button class="account-icon edit-icon" data-edit="${r.id}" title="Edit entry" aria-label="Edit entry">✎</button>` : '';
+  if (r.type === 'expense') return `<button class="row-action" data-edit="${r.id}">Edit</button><button class="delete-btn" data-delete="${r.id}">Delete</button>`;
+  return `${payButton}<button class="account-icon edit-icon" data-edit="${r.id}" title="Edit entry" aria-label="Edit entry">✎</button><button class="account-icon delete-icon" data-delete="${r.id}" title="Delete entry" aria-label="Delete entry">×</button>`;
+}
+
+function statusBadge(r) {
+  const status = statusOf(r);
+  return `<span class="status ${status}">${status.replace('-', ' ')}</span>`;
+}
+
+function tableRow(r) {
+  const color = /^#[0-9a-f]{6}$/i.test(r.color || '') ? r.color : '';
+  return `<div class="record-row" data-entry-id="${esc(r.id)}" data-color-record="${esc(r.id)}" style="--entry-highlight:${color}"><div><strong>${esc(r.name || 'Untitled record')}</strong><span>${esc(r.type === 'expense' ? (r.category || 'Other') : (r.party || 'No contact'))}</span></div><span>${dateText(r.date)}</span><span>${r.type === 'expense' ? '—' : dateText(r.due)}</span><div><strong class="amount ${r.type}">${money.format(r.amount)}</strong><span>${r.type === 'expense' ? 'Recorded' : `${money.format(paid(r))} paid`}</span></div><div>${statusBadge(r)}</div><div class="row-actions">${actions(r)}</div></div>`;
+}
+
+function accountCard(r) {
+  const receivable = r.type === 'receivable',
+        balance = outstanding(r),
+        sign = receivable ? (balance >= 0 ? '+' : '-') : (balance >= 0 ? '-' : '+'),
+        party = r.party || r.name || 'No contact',
+        detail = [dateText(r.date), r.time || '—', r.due ? `Due ${dateText(r.due)}` : 'No due date'].filter(Boolean).join(' · '),
+        notes = noteEntries(r),
+        color = /^#[0-9a-f]{6}$/i.test(r.color || '') ? r.color : '';
+  return `<article class="account-card" data-entry-id="${esc(r.id)}" data-color-record="${esc(r.id)}" style="--entry-highlight:${color}"><div class="account-info"><strong>${esc(party)}</strong><span>${esc(detail)}</span>${notes.length ? `<details class="account-notes"><summary>Notes (${notes.length}) <b>⌄</b></summary><div>${notes.map(note => `<div class="note-history"><span>${esc(note.text)}</span><small>${esc(noteMeta(note, r))}</small></div>`).join('')}</div></details>` : ''}</div><div class="account-money"><strong class="amount ${r.type}">${sign}${money.format(Math.abs(balance))}</strong></div><div class="account-actions">${actions(r)}</div></article>`;
+}
+
+function renderList(type) {
+  const items = filtered(type), target = $(`#${type}-list`);
+  if (!target) return;
+  if (!items.length) {
+    target.innerHTML = `<div class="empty">No ${type === 'expense' ? 'cash-out records' : `${type}s`} yet.</div>`;
+    return;
+  }
+  target.innerHTML = type === 'expense' ? `<div class="list-head"><span>Description</span><span>Date</span><span>Due date</span><span>Amount</span><span>Status</span><span></span></div>${items.map(tableRow).join('')}` : items.map(accountCard).join('');
+}
+
+function renderDashboard() {
+  const rec = records.filter(r => r.type === 'receivable'),
+        pay = records.filter(r => r.type === 'payable'),
+        expenses = records.filter(r => r.type === 'expense'),
+        directCashOut = expenses.filter(monthRecord).reduce((s, r) => s + Number(r.amount), 0),
+        supplierPayments = pay.reduce((s, r) => s + paymentsThisMonth(r), 0),
+        monthExpenses = directCashOut + supplierPayments,
+        monthIncome = rec.reduce((s, r) => s + paymentsThisMonth(r), 0);
+  
+  if ($('#receivable-total')) $('#receivable-total').textContent = money.format(rec.reduce((s, r) => s + outstanding(r), 0));
+  if ($('#payable-total')) $('#payable-total').textContent = money.format(pay.reduce((s, r) => s + outstanding(r), 0));
+  if ($('#expense-total')) $('#expense-total').textContent = money.format(monthExpenses);
+  if ($('#expense-count')) $('#expense-count').textContent = `${expenses.length} cash-out entries recorded`;
+  if ($('#net-total')) $('#net-total').textContent = money.format(monthIncome - monthExpenses);
+
+  const recent = records.filter(r => r.date === today()).sort((a, b) => String(b.createdAt || b.id).localeCompare(String(a.createdAt || a.id)));
+  if ($('#recent-list')) $('#recent-list').innerHTML = recent.length ? recent.map(r => `<button class="activity-row activity-link" data-open-entry="${esc(r.id)}" data-open-type="${r.type}" type="button"><div class="record-icon ${r.type}">${r.type === 'expense' ? '↓' : r.type === 'receivable' ? '↑' : '→'}</div><div><h3>${esc(r.name || 'Untitled record')}</h3><p>${typeName(r.type)} · ${r.type === 'expense' ? r.category || 'Other' : r.party || 'No contact'}</p></div><div class="amount ${r.type}">${money.format(r.amount)}</div></button>`).join('') : '<div class="empty">No entries recorded today.</div>';
+
+  const watch = [...rec, ...pay].filter(r => statusOf(r) !== 'paid' && r.due && isDue(r, 7)).sort((a, b) => a.due.localeCompare(b.due));
+  if ($('#alerts-list')) $('#alerts-list').innerHTML = watch.length ? watch.map(r => `<div class="alert-row ${statusOf(r) === 'overdue' ? 'overdue-alert' : ''}"><div><strong>${esc(r.name || r.party || 'Untitled record')}</strong><span>${typeName(r.type)} · Due ${dateText(r.due)}</span></div><div>${statusBadge(r)} <strong>${money.format(outstanding(r))}</strong></div></div>`).join('') : '<div class="empty small-empty">No due-date reminders right now.</div>';
+}
+
+function renderContacts() {
+  const query = $('[data-contact-search]')?.value.toLowerCase() || '',
+        items = contacts.filter(c => `${c.name} ${c.type} ${c.phone} ${c.email}`.toLowerCase().includes(query));
+  if ($('#contacts-list')) $('#contacts-list').innerHTML = items.length ? `<div class="list-head contact-head"><span>Name</span><span>Type</span><span>Phone</span><span>Email</span></div>${items.map(c => `<div class="contact-row"><strong>${esc(c.name)}</strong><span>${esc(c.type)}</span><span>${esc(c.phone || '—')}</span><span>${esc(c.email || '—')}</span></div>`).join('')}` : '<div class="empty">No saved contacts yet.</div>';
+  
+  const names = [...new Set([...contacts.map(c => c.name), ...records.map(r => r.party)].map(name => String(name || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  if ($('#contact-options')) $('#contact-options').innerHTML = names.map(name => `<option value="${esc(name)}"></option>`).join('');
+}
+
+function renderReports() {
+  const expenses = records.filter(r => r.type === 'expense' && monthRecord(r)),
+        income = records.filter(r => r.type === 'receivable').reduce((s, r) => s + paymentsThisMonth(r), 0),
+        directCashOut = expenses.reduce((s, r) => s + Number(r.amount), 0),
+        supplierPayments = records.filter(r => r.type === 'payable').reduce((s, r) => s + paymentsThisMonth(r), 0),
+        cash = directCashOut + supplierPayments;
+
+  if ($('#report-income')) $('#report-income').textContent = money.format(income);
+  if ($('#report-expense')) $('#report-expense').textContent = money.format(cash);
+  if ($('#report-net')) $('#report-net').textContent = money.format(income - cash);
+
+  const grouped = Object.entries(expenses.reduce((a, r) => { a[r.category || 'Other'] = (a[r.category || 'Other'] || 0) + Number(r.amount); return a; }, {}));
+  if ($('#category-report')) $('#category-report').innerHTML = grouped.length ? grouped.sort((a, b) => b[1] - a[1]).map(([name, value]) => `<div class="report-row"><span>${esc(name)}</span><strong>${money.format(value)}</strong></div>`).join('') : '<div class="empty small-empty">No cash-out records this month.</div>';
+
+  const balance = [...records.filter(r => r.type === 'receivable' || r.type === 'payable')].filter(r => statusOf(r) !== 'paid');
+  if ($('#balance-report')) $('#balance-report').innerHTML = balance.length ? balance.map(r => `<div class="report-row"><span>${esc(r.party || r.name || 'Untitled')} <small>${typeName(r.type)}</small></span><strong>${money.format(outstanding(r))}</strong></div>`).join('') : '<div class="empty small-empty">No unpaid balances.</div>';
+}
+
+const safePhoto = value => /^data:image\/(png|jpeg|webp);base64,/i.test(String(value || '')) ? String(value) : '';
+function stockPhotoMarkup(item) {
+  const photo = safePhoto(item.photo);
+  return photo ? `<img class="stock-thumb" src="${photo}" data-view-stock-photo="${item.id}" alt="Picture of ${esc(item.name)}" title="View picture" />` : '';
+}
+
+function renderStock() {
+  const items = [...outOfStock].sort((a, b) => Number(b.replaced) - Number(a.replaced) || String(b.replacedDate || b.date).localeCompare(String(a.replacedDate || a.date)));
+  if ($('#out-of-stock-list')) $('#out-of-stock-list').innerHTML = items.length ? items.map(item => `<details class="stock-row ${item.replaced ? 'replaced' : ''}"><summary>${stockPhotoMarkup(item)}<div class="stock-details"><strong>${esc(item.name)}</strong><span>${item.replaced ? `Replaced ${dateText(item.replacedDate || item.date)}` : `Noted ${dateText(item.date)}`}</span></div><b class="stock-fold">⌄</b></summary><div class="stock-expanded">${item.remaining ? `<small>${esc(item.remaining)}</small>` : '<small>No remaining-item notes.</small>'}<div class="stock-actions">${isStockManager() ? `<button class="row-action" data-edit-stock="${item.id}">Edit</button>` : ''}${item.replaced ? (isStockManager() ? `<button class="row-action" data-stock-out="${item.id}">↺ Unmark as replaced</button>` : '<span class="stock-done">✓ Replaced</span>') : isStockManager() ? `<button class="row-action" data-stock-replace="${item.id}">✓ Mark replaced</button>` : '<span class="status open">Out of stock</span>'}${currentUser?.role === 'admin' ? `<button class="delete-btn" data-stock-delete="${item.id}">Delete</button>` : ''}</div></div></details>`).join('') : '<div class="empty small-empty">No out-of-stock items noted.</div>';
+  $('#delete-all-stock')?.classList.toggle('hidden', currentUser?.role !== 'admin' || !items.length);
+}
+
+async function pullAssistantLogins() {
+  if (currentUser?.role !== 'admin' || !token()) return;
+  try {
+    const users = await googleRequest('listUsers');
+    assistantLogins = users.filter(user => user.active).map(user => ({ id: user.id, username: user.username, access: user.role === 'stock' ? 'stock' : 'assistant' }));
+    localStorage.setItem(assistantLoginsKey, JSON.stringify(assistantLogins));
+    renderAssistantLogins();
+  } catch {}
+}
+
+function renderAssistantNotifications() {
+  const panel = $('#assistant-notifications'), target = $('#assistant-notification-list');
+  if (!panel || !target) return;
+  panel.classList.toggle('hidden', currentUser?.role !== 'admin' || !notificationFeed.length);
+  target.innerHTML = notificationFeed.slice(0, 5).map(item => `<div class="alert-row"><div><strong>${esc(item.message)}</strong><span>${dateText(String(item.createdAt || '').slice(0, 10))}</span></div></div>`).join('');
+}
+
+async function pullAssistantNotifications() {
+  if (currentUser?.role !== 'admin' || !token()) return;
+  try {
+    const list = await googleRequest('listNotifications');
+    notificationFeed = list;
+    renderAssistantNotifications();
+    const newest = list[0]?.id, seen = localStorage.getItem('sarmart-last-assistant-alert');
+    if (!newest || !seen) {
+      if (newest) localStorage.setItem('sarmart-last-assistant-alert', newest);
+      return;
+    }
+    if (newest !== seen) {
+      const item = list[0];
+      localStorage.setItem('sarmart-last-assistant-alert', newest);
+      toast(item.message);
+      if ('Notification' in window && Notification.permission === 'granted') new Notification('SARMART assistant update', { body: item.message });
+    }
+  } catch {}
+}
+
+function renderAssistantLogins() {
+  const target = $('#assistant-logins-list');
+  if (!target) return;
+  target.innerHTML = assistantLogins.length ? assistantLogins.map(login => `<div class="assistant-login-row"><strong>${esc(login.username)}</strong><span>${login.access === 'stock' ? 'Stock Assistant — Out of Stock only' : 'Assistant login'}</span>${currentUser?.role === 'admin' ? `<button class="delete-btn" data-delete-assistant="${esc(login.id)}">Delete</button>` : ''}</div>`).join('') : '<div class="empty small-empty">No Assistant logins created yet.</div>';
+}
+
+function renderSectionTotals() {
+  const receivable = records.filter(r => r.type === 'receivable').reduce((sum, r) => sum + outstanding(r), 0),
+        payable = records.filter(r => r.type === 'payable').reduce((sum, r) => sum + outstanding(r), 0),
+        cashOut = records.filter(r => r.type === 'expense').reduce((sum, r) => sum + Number(r.amount || 0), 0),
+        setTotal = (view, label, value) => {
+          const heading = $(`#${view} .section-heading > div:first-child`);
+          if (!heading) return;
+          let total = heading.querySelector('.section-total');
+          if (!total) {
+            total = document.createElement('strong');
+            total.className = 'section-total';
+            heading.append(total);
+          }
+          total.textContent = `${label}: ${money.format(value)}`;
+        };
+  setTotal('expenses', 'Cash out total', cashOut);
+  setTotal('receivables', 'Receivable total', receivable);
+  setTotal('payables', 'Payable total', payable);
+}
+
+function renderReconciliation() {
+  const selectedDate = $('#recon-date')?.value || reconciliation.date || today(),
+        saved = reconciliation.date === selectedDate;
+  if ($('#recon-date')) $('#recon-date').value = selectedDate;
+  if ($('#recon-sales')) $('#recon-sales').value = saved && reconciliation.sales !== undefined ? reconciliation.sales : '';
+  if ($('#recon-purchases')) $('#recon-purchases').value = saved && reconciliation.purchases !== undefined ? reconciliation.purchases : '';
+  if ($('#recon-profit')) $('#recon-profit').value = saved && reconciliation.profit !== undefined ? reconciliation.profit : '';
+  updateReconciliationStatus();
+}
+
+function updateReconciliationStatus() {
+  const sales = Number($('#recon-sales')?.value || 0),
+        purchases = Number($('#recon-purchases')?.value || 0),
+        profit = Number($('#recon-profit')?.value || 0),
+        difference = sales - (purchases + profit),
+        status = $('#recon-status');
+  if (!status) return;
+  status.classList.toggle('unbalanced', Math.abs(difference) > 0.005);
+  status.classList.toggle('balanced', Math.abs(difference) <= 0.005);
+  status.textContent = Math.abs(difference) <= 0.005 ? 'Less / Extra: KSh 0 (Balanced)' : difference > 0 ? `Extra: ${money.format(difference)}` : `Less: ${money.format(Math.abs(difference))}`;
+}
+
+function moveReconciliationToDashboard() {
+  const panel = $('.reconciliation-panel'),
+        dashboard = $('#dashboard'),
+        alerts = $('#dashboard .alerts-panel');
+  if (!panel || !dashboard) return;
+  if (panel.parentElement !== dashboard) {
+    panel.classList.add('dashboard-reconciliation');
+    dashboard.insertBefore(panel, alerts || dashboard.firstElementChild);
+  }
+  if (!$('#recon-date')) {
+    const label = document.createElement('label'),
+          input = document.createElement('input');
+    input.id = 'recon-date';
+    input.type = 'date';
+    input.value = reconciliation.date || today();
+    input.addEventListener('change', renderReconciliation);
+    label.append('Reconciliation date', input);
+    panel.querySelector('.reconciliation-fields')?.before(label);
+  }
+  if ($('#reconciliation-title')) $('#reconciliation-title').textContent = 'Less / Extra';
+  if (panel.querySelector('.reconciliation-note')) {
+    panel.querySelector('.reconciliation-note').textContent = 'This does not change receivables, payables, or cash flow totals.';
+  }
+}
+
+function render() {
+  renderDashboard();
+  renderList('expense');
+  renderList('receivable');
+  renderList('payable');
+  renderContacts();
+  renderReports();
+  renderStock();
+  renderAssistantLogins();
+  renderSectionTotals();
+  renderReconciliation();
+  moveReconciliationToDashboard();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  applyAppearance();
+  render();
+});
