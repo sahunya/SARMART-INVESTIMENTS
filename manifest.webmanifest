@@ -1,1 +1,39 @@
-{"name":"SARMART INVESTIMENTS","short_name":"SARMART","start_url":"./","display":"standalone","background_color":"#f5f8f8","theme_color":"#155e75","description":"Expense, receivable, and payable tracker."}
+{
+  "name": "My Application",
+  "short_name": "App",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "desktop-screenshot.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Desktop Home Screen"
+    },
+    {
+      "src": "mobile-screenshot.png",
+      "sizes": "640x1136",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Mobile Home Screen"
+    }
+  ]
+}
