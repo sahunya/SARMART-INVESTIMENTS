@@ -4,7 +4,10 @@
  * token after signing in; they never receive the Sheet connection token.
  */
 const API_TOKEN = 'Sarmart_2026!xR7kP2vN9mQ4zL8tH5wC';
-const RECORDS_SHEET = 'Transactions';
+const LEGACY_RECORDS_SHEET = 'Transactions';
+const RECEIVABLES_SHEET = 'Receivables';
+const PAYABLES_SHEET = 'Payables';
+const EXPENSES_SHEET = 'Expenses';
 const CONTACTS_SHEET = 'Contacts';
 const STOCK_SHEET = 'Out of stock';
 const USERS_SHEET = 'App users';
@@ -17,6 +20,7 @@ const NOTIFICATION_HEADERS = ['id', 'message', 'createdAt'];
 const SESSION_VERSION_KEY = 'sarmart_session_version';
 const SESSION_PREFIX = 'sarmart_user_session_';
 const PASSWORD_SALT_KEY = 'sarmart_password_salt';
+const RECORDS_MIGRATION_KEY = 'sarmart_records_split_v1';
 
 function doGet(e) { return handle_(e.parameter || {}); }
 function doPost(e) { try { return handle_(JSON.parse((e.postData && e.postData.contents) || '{}')); } catch (error) { return output_({ ok: false, error: 'Invalid request body.' }); } }
@@ -31,7 +35,9 @@ function passwordHash_(password) { const props = PropertiesService.getScriptProp
 function output_(data) { return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON); }
 function sessionVersion_() { return PropertiesService.getScriptProperties().getProperty(SESSION_VERSION_KEY) || '1'; }
 function rotateSessionVersion_() { const version = String(Date.now()); PropertiesService.getScriptProperties().setProperty(SESSION_VERSION_KEY, version); return { version: version }; }
-function sheet_() { return ensureSheet_(RECORDS_SHEET, HEADERS); }
+function recordSheet_(type) { const name = type === 'receivable' ? RECEIVABLES_SHEET : type === 'payable' ? PAYABLES_SHEET : type === 'expense' ? EXPENSES_SHEET : ''; if (!name) throw new Error('Unknown transaction type.'); return ensureSheet_(name, HEADERS); }
+function recordSheets_() { return [recordSheet_('receivable'), recordSheet_('payable'), recordSheet_('expense')]; }
+function migrateLegacyRecords_() { const props = PropertiesService.getScriptProperties(); if (props.getProperty(RECORDS_MIGRATION_KEY)) return; const spreadsheet = SpreadsheetApp.getActiveSpreadsheet(), legacy = spreadsheet.getSheetByName(LEGACY_RECORDS_SHEET); if (!legacy || legacy.getLastRow() < 2) { props.setProperty(RECORDS_MIGRATION_KEY, 'done'); return; } const entries = rows_(legacy); entries.forEach(record => { if (!['receivable', 'payable', 'expense'].includes(record.type)) return; const target = recordSheet_(record.type); if (record.id && findRow_(target, record.id) >= 2) return; target.appendRow(HEADERS.map(header => serialize_(record[header]))); }); legacy.deleteRows(2, legacy.getLastRow() - 1); props.setProperty(RECORDS_MIGRATION_KEY, 'done'); }
 function contactsSheet_() { return ensureSheet_(CONTACTS_SHEET, CONTACT_HEADERS); }
 function stockSheet_() { return ensureSheet_(STOCK_SHEET, STOCK_HEADERS); }
 function usersSheet_() { return ensureSheet_(USERS_SHEET, USER_HEADERS); }
@@ -39,12 +45,14 @@ function notificationsSheet_() { return ensureSheet_(NOTIFICATIONS_SHEET, NOTIFI
 function ensureSheet_(name, headers) { const spreadsheet = SpreadsheetApp.getActiveSpreadsheet(); let sheet = spreadsheet.getSheetByName(name); if (!sheet) { sheet = spreadsheet.insertSheet(name); sheet.appendRow(headers); sheet.setFrozenRows(1); } else { const existing = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]; headers.filter(header => !existing.includes(header)).forEach(header => sheet.getRange(1, sheet.getLastColumn() + 1).setValue(header)); } return sheet; }
 function serialize_(value) { return value && typeof value === 'object' ? JSON.stringify(value) : value ?? ''; }
 function rows_(sheet) { const values = sheet.getDataRange().getValues(); if (values.length < 2) return []; const headers = values.shift(); return values.map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? '']))); }
-function findRow_(sheet, id) { const count = sheet.getLastRow() - 1; if (count < 1) return -1; return sheet.getRange(2, 1, count, 1).getValues().flat().indexOf(id) + 2; }
-function listRecords_() { return rows_(sheet_()); }
-function createRecord_(record) { if (!record || !record.id || !record.type || !Number.isFinite(Number(record.amount)) || !record.date) throw new Error('Missing transaction details.'); const lock = LockService.getScriptLock(); lock.waitLock(30000); try { const sheet = sheet_(), existingRow = findRow_(sheet, record.id), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...record, createdAt: record.createdAt || new Date().toISOString() }; if (existingRow >= 2) { const old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(existingRow, i + 1).getValue()])); sheet.getRange(existingRow, 1, 1, headers.length).setValues([headers.map(header => serialize_({ ...old, ...values }[header]))]); return record; } sheet.appendRow(headers.map(header => serialize_(values[header]))); return record; } finally { lock.releaseLock(); } }
-function updateRecord_(record) { if (!record || !record.id) throw new Error('Missing transaction ID.'); const sheet = sheet_(), row = findRow_(sheet, record.id); if (row < 2) throw new Error('Transaction not found.'); const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(row, i + 1).getValue()])), values = { ...old, ...record }; sheet.getRange(row, 1, 1, headers.length).setValues([headers.map(header => serialize_(values[header]))]); return record; }
-function deleteRecord_(id) { const sheet = sheet_(), row = findRow_(sheet, id); if (row < 2) throw new Error('Transaction not found.'); sheet.deleteRow(row); return { id: id }; }
-function deleteRecords_(ids) { if (!Array.isArray(ids) || !ids.length) return { count: 0 }; const sheet = sheet_(), wanted = new Set(ids), rows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().flat() : []; const targets = rows.map((id, index) => wanted.has(id) ? index + 2 : 0).filter(Boolean).sort((a,b) => b-a); targets.forEach(row => sheet.deleteRow(row)); return { count: targets.length }; }
+function findRows_(sheet, id) { const count = sheet.getLastRow() - 1; if (count < 1) return []; return sheet.getRange(2, 1, count, 1).getValues().flat().map((value, index) => String(value) === String(id) ? index + 2 : 0).filter(Boolean); }
+function findRow_(sheet, id) { return findRows_(sheet, id)[0] || -1; }
+function removeDuplicateRows_(sheet, rows) { rows.slice(1).sort((a, b) => b - a).forEach(row => sheet.deleteRow(row)); }
+function listRecords_() { migrateLegacyRecords_(); return recordSheets_().flatMap(rows_); }
+function createRecord_(record) { if (!record || !record.id || !record.type || !Number.isFinite(Number(record.amount)) || !record.date) throw new Error('Missing transaction details.'); const lock = LockService.getScriptLock(); lock.waitLock(30000); try { const sheet = recordSheet_(record.type), matchingRows = findRows_(sheet, record.id), existingRow = matchingRows[0] || -1, headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...record, createdAt: record.createdAt || new Date().toISOString() }; if (existingRow >= 2) { const old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(existingRow, i + 1).getValue()])); sheet.getRange(existingRow, 1, 1, headers.length).setValues([headers.map(header => serialize_({ ...old, ...values }[header]))]); removeDuplicateRows_(sheet, matchingRows); return record; } sheet.appendRow(headers.map(header => serialize_(values[header]))); return record; } finally { lock.releaseLock(); } }
+function updateRecord_(record) { if (!record || !record.id || !record.type) throw new Error('Missing transaction details.'); const lock = LockService.getScriptLock(); lock.waitLock(30000); try { const sheet = recordSheet_(record.type), matchingRows = findRows_(sheet, record.id), row = matchingRows[0] || -1; if (row < 2) throw new Error('Transaction not found.'); const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], old = Object.fromEntries(headers.map((header, i) => [header, sheet.getRange(row, i + 1).getValue()])), values = { ...old, ...record }; sheet.getRange(row, 1, 1, headers.length).setValues([headers.map(header => serialize_({ ...old, ...values }[header]))]); removeDuplicateRows_(sheet, matchingRows); return record; } finally { lock.releaseLock(); } }
+function deleteRecord_(id) { for (const sheet of recordSheets_()) { const rows = findRows_(sheet, id); if (rows.length) { rows.sort((a, b) => b - a).forEach(row => sheet.deleteRow(row)); return { id: id }; } } throw new Error('Transaction not found.'); }
+function deleteRecords_(ids) { if (!Array.isArray(ids) || !ids.length) return { count: 0 }; const wanted = new Set(ids); let count = 0; recordSheets_().forEach(sheet => { const rows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().flat() : [], targets = rows.map((id, index) => wanted.has(id) ? index + 2 : 0).filter(Boolean).sort((a,b) => b-a); targets.forEach(row => sheet.deleteRow(row)); count += targets.length; }); return { count: count }; }
 function listContacts_() { return rows_(contactsSheet_()); }
 function createContact_(contact) { if (!contact || !contact.id || !contact.name) throw new Error('Missing contact details.'); const sheet = contactsSheet_(), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0], values = { ...contact, createdAt: new Date().toISOString() }; sheet.appendRow(headers.map(header => serialize_(values[header]))); return contact; }
 function listStock_() { return rows_(stockSheet_()); }
