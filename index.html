@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#176b29" /><link rel="manifest" href="manifest.webmanifest?v=148" />
-  <link rel="stylesheet" href="styles.css?v=148" /><title>SARMART INVESTIMENTS | Business finance</title>
+  <meta name="theme-color" content="#176b29" /><link rel="manifest" href="manifest.webmanifest?v=153" />
+  <link rel="stylesheet" href="styles.css?v=153" /><title>SARMART INVESTIMENTS | Business finance</title>
   <style>.app-shell.stock-only .account-controls,.app-shell.assistant-user .dashboard-reconciliation{display:none!important}</style>
 </head>
 <body>
@@ -20,7 +20,7 @@
   <div class="app-shell hidden" id="app-shell">
     <aside class="sidebar"><div class="sidebar-top"><a class="brand" href="#dashboard"><img class="brand-mark" src="icon-192.png" alt="" /><span>SARMART INVESTIMENTS</span></a></div>
       <nav class="nav" aria-label="Main navigation">
-        <button class="nav-link active" data-view="dashboard">Dashboard</button><button class="nav-link" data-view="expenses">Cash Flow</button><button class="nav-link" data-view="receivables">Receivable</button><button class="nav-link" data-view="payables">Payable</button><button class="nav-link" id="add-record">Add entry</button><button class="nav-link" data-view="contacts">Contacts</button><button class="nav-link" data-view="reports">Reports</button>
+        <button class="nav-link active" data-view="dashboard">Dashboard</button><button class="nav-link" data-view="expenses">Cash Flow</button><button class="nav-link" data-view="receivables">Receivable</button><button class="nav-link" data-view="payables">Payable</button><button class="nav-link" id="add-record">Add entry</button><button class="nav-link" id="search-records">Search &amp; edit</button><button class="nav-link" data-view="contacts">Contacts</button><button class="nav-link" data-view="reports">Reports</button>
       </nav><div class="sidebar-foot">Your business records, in one place.</div>
     </aside><div class="mobile-menu-brand"><a class="brand" href="#dashboard"><img class="brand-mark" src="icon-192.png" alt="" /><span>SARMART INVESTMENTS</span></a><button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open main menu" aria-expanded="false">☰</button></div><button class="menu-backdrop" id="menu-backdrop" type="button" aria-label="Close main menu"></button>
     <main class="main-content">
@@ -53,5 +53,6 @@
   <dialog id="stock-edit-dialog"><form id="stock-edit-form"><div class="modal-head"><div><p class="eyebrow">Out of stock</p><h2>Edit stock entry</h2></div><button class="icon-btn" type="button" data-close-stock-edit aria-label="Close">×</button></div><input id="stock-edit-id" type="hidden" /><label>Item<input id="stock-edit-name" required /></label><label>Date noted<input id="stock-edit-date" type="date" required /></label><label>Remaining items / notes<textarea id="stock-edit-remaining"></textarea></label><label class="stock-photo-label">Photo (optional)<input id="stock-edit-photo" type="file" accept="image/*" capture="environment" /><span>📷 Replace picture / upload</span></label><div class="stock-photo-preview hidden" id="stock-edit-preview"><img id="stock-edit-preview-image" alt="Stock photo" /><button type="button" id="clear-stock-edit-photo">Remove photo</button></div><div class="modal-actions"><button type="button" data-close-stock-edit class="secondary-btn">Cancel</button><button class="primary-btn" type="submit">Save changes</button></div></form></dialog>
   <dialog id="stock-photo-dialog"><div class="stock-photo-view"><button class="icon-btn" type="button" data-close-stock-photo aria-label="Close">×</button><img id="stock-photo-full" alt="Stock item photo" /></div></dialog>
   <dialog id="entry-choice-dialog"><div class="entry-choice"><div class="modal-head"><div><p class="eyebrow">New entry</p><h2>What would you like to add?</h2></div><button class="icon-btn" type="button" data-close-entry-choice aria-label="Close">×</button></div><button class="primary-btn" data-entry-type="expense">Cash entry</button><button class="primary-btn" data-entry-type="receivable">Receivable</button><button class="primary-btn" data-entry-type="payable">Payable</button></div></dialog>
-  <input id="import-file" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden /><div id="toast" role="status" aria-live="polite"></div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="app.js?v=148"></script>
+  <dialog id="record-search-dialog"><div class="record-search"><div class="modal-head"><div><p class="eyebrow">Find an entry</p><h2>Search &amp; edit</h2></div><button class="icon-btn" type="button" data-close-record-search aria-label="Close">Ã—</button></div><input id="record-search-input" type="search" autocomplete="off" placeholder="Search supplier, customer, or description" /><div id="record-search-results" class="record-search-results"></div></div></dialog>
+  <input id="import-file" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden /><div id="toast" role="status" aria-live="polite"></div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="app.js?v=153"></script>
 </body></html>
