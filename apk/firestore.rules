@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // SARMART users receive a Firebase anonymous sign-in automatically.
+    // This blocks unauthenticated visitors while allowing the app to work offline.
+    match /businesses/sarmart-investments/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
