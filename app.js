@@ -283,3 +283,24 @@ render();
 const renderRecordSearchWithPersonFirst=renderRecordSearch;
 renderRecordSearch=function(){renderRecordSearchWithPersonFirst();$$('#record-search-results [data-open-search-record]').forEach(button=>{const record=records.find(item=>item.id===button.dataset.openSearchRecord),title=button.querySelector('span strong'),subtitle=button.querySelector('span small');if(!record||!title||!subtitle)return;title.textContent=record.party||record.name||'Untitled entry';subtitle.textContent=`${typeName(record.type)} · ${record.type==='expense'?record.category||'Other':record.name||record.party||'No description'}`;});};
 render();
+
+// General business notes are separate from customer, supplier and transaction
+// notes. They are stored as individual cloud records so every device sees them.
+const businessNotesKey='sarmart-business-notes-v1';
+let businessNotes=readJson(localStorage,businessNotesKey,[]),businessNotesListening=false;
+const businessNotesNav=document.createElement('button'),businessNotesView=document.createElement('section');
+businessNotesNav.type='button';businessNotesNav.className='nav-link';businessNotesNav.dataset.view='business-notes';businessNotesNav.textContent='Business notes';$('#search-records').after(businessNotesNav);
+businessNotesNav.addEventListener('click',()=>{showView('business-notes');if(window.matchMedia('(max-width: 760px)').matches)setMenuDrawer(false);});
+businessNotesView.id='business-notes';businessNotesView.className='view';businessNotesView.innerHTML='<div class="section-heading"><div><h2>Business notes</h2><p>General reminders and notes for your business.</p></div></div><form id="business-note-form" class="business-note-form"><textarea id="business-note-text" required rows="3" placeholder="Write a business reminder, idea, or note"></textarea><button class="primary-btn" type="submit">Save note</button></form><div id="business-notes-list" class="business-notes-list"></div>';$('#reports').before(businessNotesView);
+function noteDateTime(note){const value=Date.parse(note.createdAt||'');return Number.isFinite(value)?new Date(value).toLocaleString('en-KE',{weekday:'short',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'Just now';}
+function renderBusinessNotes(){const target=$('#business-notes-list');if(!target)return;const items=[...businessNotes].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));target.innerHTML=items.length?items.map(note=>`<article class="business-note"><div><p>${esc(note.text)}</p><small>${esc(noteDateTime(note))} · Entered by ${esc(note.enteredBy||'Not recorded')}</small></div>${currentUser?.role==='admin'?`<button type="button" class="delete-btn" data-delete-business-note="${esc(note.id)}">Delete</button>`:''}</article>`).join(''):'<div class="empty">No business notes yet.</div>';}
+async function watchBusinessNotes(){if(!currentUser||!canSync()||businessNotesListening)return;try{await firestoreReady();businessNotesListening=true;firestoreCollection('business-notes').onSnapshot(snapshot=>{businessNotes=snapshot.docs.map(firestoreData);localStorage.setItem(businessNotesKey,JSON.stringify(businessNotes));renderBusinessNotes();},()=>{});}catch{}}
+$('#business-note-form').addEventListener('submit',async event=>{event.preventDefault();const text=$('#business-note-text').value.trim();if(!text)return;const note={id:crypto.randomUUID(),text,createdAt:new Date().toISOString(),enteredBy:currentUser?.username||currentUser?.label||'Not recorded'};businessNotes.unshift(note);localStorage.setItem(businessNotesKey,JSON.stringify(businessNotes));renderBusinessNotes();$('#business-note-text').value='';try{await firestoreReady();await firestoreCollection('business-notes').doc(note.id).set(firestoreClean(note));toast('Business note saved');}catch{toast('Note is saved on this device and will sync when online.');}});
+document.addEventListener('click',async event=>{const button=event.target.closest('[data-delete-business-note]');if(!button||currentUser?.role!=='admin')return;if(!confirm('Delete this business note?'))return;const id=button.dataset.deleteBusinessNote;businessNotes=businessNotes.filter(note=>note.id!==id);localStorage.setItem(businessNotesKey,JSON.stringify(businessNotes));renderBusinessNotes();try{await firestoreReady();await firestoreCollection('business-notes').doc(id).delete();toast('Business note deleted');}catch{toast('Could not delete the cloud note.');}});
+const renderWithBusinessNotes=render;
+render=function(){renderWithBusinessNotes();renderBusinessNotes();};
+const showViewWithBusinessNotes=showView;
+showView=function(view,updateLink=true){showViewWithBusinessNotes(view,updateLink);if(view==='business-notes')$('#page-title').textContent='Business notes';};
+const updateLoginWithBusinessNotes=updateLogin;
+updateLogin=function(){updateLoginWithBusinessNotes();watchBusinessNotes();};
+watchBusinessNotes();render();
