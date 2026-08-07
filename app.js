@@ -271,3 +271,15 @@ const renderRecordSearchWithNewCustomer=renderRecordSearch;
 renderRecordSearch=function(){renderRecordSearchWithNewCustomer();const target=$('#record-search-results'),name=$('#record-search-input').value.trim(),hasEntry=target.querySelector('[data-open-search-record]'),known=contacts.some(contact=>String(contact.name||'').trim().toLowerCase()===name.toLowerCase());if(name&&!hasEntry&&!known)target.innerHTML=`<p class="record-search-empty">No entry found for “${esc(name)}”.</p><button type="button" class="primary-btn compact" data-add-customer-from-search="${esc(name)}">+ Add ${esc(name)} as a new customer</button>`;};
 document.addEventListener('click',event=>{const button=event.target.closest('[data-add-customer-from-search]');if(!button)return;$('#record-search-dialog').close();$('#contact-form').reset();$('#contact-name').value=button.dataset.addCustomerFromSearch;$('#contact-type').value='customer';$('#contact-dialog').showModal();setTimeout(()=>$('#contact-phone').focus(),0);});
 render();
+
+// Keep the main account lists in their familiar customer/supplier-first form.
+// Description-first ordering remains available in Search & edit.
+const accountCardWithOriginalPersonFirst=accountCard;
+accountCard=function(record){let html=accountCardWithOriginalPersonFirst(record);const description=entryHeading(record),person=entryPerson(record);if(description!==person)html=html.replace(`<strong>${esc(description)}</strong>`,`<strong>${esc(person)}</strong>`);return html;};
+render();
+
+// Search follows the same rule: the person is always the title, while the
+// description stays beneath it and never replaces the person's name.
+const renderRecordSearchWithPersonFirst=renderRecordSearch;
+renderRecordSearch=function(){renderRecordSearchWithPersonFirst();$$('#record-search-results [data-open-search-record]').forEach(button=>{const record=records.find(item=>item.id===button.dataset.openSearchRecord),title=button.querySelector('span strong'),subtitle=button.querySelector('span small');if(!record||!title||!subtitle)return;title.textContent=record.party||record.name||'Untitled entry';subtitle.textContent=`${typeName(record.type)} · ${record.type==='expense'?record.category||'Other':record.name||record.party||'No description'}`;});};
+render();
