@@ -304,3 +304,27 @@ showView=function(view,updateLink=true){showViewWithBusinessNotes(view,updateLin
 const updateLoginWithBusinessNotes=updateLogin;
 updateLogin=function(){updateLoginWithBusinessNotes();watchBusinessNotes();};
 watchBusinessNotes();render();
+
+// Today's activity also keeps the person as the headline, never a note or
+// description such as "Airtime" or "All time balance".
+const renderDashboardWithPersonFirst=renderDashboard;
+renderDashboard=function(){renderDashboardWithPersonFirst();const recent=records.filter(record=>normalizeDate(record.date)===today()||normalizeDate(record.updatedAt)===today()).sort((a,b)=>String(activityTime(b)).localeCompare(String(activityTime(a))));$$('#recent-list .activity-row').forEach((row,index)=>{const record=recent[index],title=row.querySelector('h3'),subtitle=row.querySelector('p');if(!record||!title||!subtitle)return;title.textContent=record.party||record.name||'Untitled entry';subtitle.textContent=`${activityLabel(record)} · ${typeName(record.type)} · ${record.type==='expense'?record.category||'Other':record.name||record.party||'No description'}`;});};
+render();
+
+// Optional compact photos for general business notes.
+let newBusinessNotePhoto='';
+const businessNotePhotoControls=document.createElement('div');
+businessNotePhotoControls.className='business-note-photo-controls';
+businessNotePhotoControls.innerHTML='<label class="business-note-photo-label">📷 Add picture (optional)<input id="business-note-photo" type="file" accept="image/*" capture="environment" /></label><div class="business-note-photo-preview hidden" id="business-note-photo-preview"><img id="business-note-photo-preview-image" alt="Business note photo preview" /><button type="button" id="clear-business-note-photo">Remove</button></div>';
+$('#business-note-text').after(businessNotePhotoControls);
+const businessNotePhotoDialog=document.createElement('dialog');
+businessNotePhotoDialog.id='business-note-photo-dialog';
+businessNotePhotoDialog.innerHTML='<div class="business-note-photo-view"><button class="icon-btn" type="button" data-close-business-note-photo aria-label="Close">×</button><img id="business-note-photo-full" alt="Business note picture" /></div>';
+document.body.append(businessNotePhotoDialog);
+$('#business-note-photo').addEventListener('change',async event=>{try{newBusinessNotePhoto=await compactImage(event.target.files[0]);setPhotoPreview(newBusinessNotePhoto,'#business-note-photo-preview','#business-note-photo-preview-image');}catch{toast('Could not use that picture.');}});
+$('#clear-business-note-photo').addEventListener('click',()=>{newBusinessNotePhoto='';$('#business-note-photo').value='';setPhotoPreview('','#business-note-photo-preview','#business-note-photo-preview-image');});
+const renderBusinessNotesWithPhotos=renderBusinessNotes;
+renderBusinessNotes=function(){renderBusinessNotesWithPhotos();const items=[...businessNotes].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));$$('#business-notes-list .business-note').forEach((article,index)=>{const photo=safePhoto(items[index]?.photo);if(!photo)return;const button=document.createElement('button');button.type='button';button.className='business-note-photo-icon';button.dataset.viewBusinessNotePhoto=photo;button.title='View picture';button.setAttribute('aria-label','View note picture');button.innerHTML=`<img src="${photo}" alt="" />`;article.querySelector('div')?.append(button);});};
+$('#business-note-form').addEventListener('submit',async event=>{event.preventDefault();event.stopImmediatePropagation();const text=$('#business-note-text').value.trim();if(!text)return;const note={id:crypto.randomUUID(),text,photo:newBusinessNotePhoto,createdAt:new Date().toISOString(),enteredBy:currentUser?.username||currentUser?.label||'Not recorded'};businessNotes.unshift(note);localStorage.setItem(businessNotesKey,JSON.stringify(businessNotes));renderBusinessNotes();$('#business-note-form').reset();newBusinessNotePhoto='';setPhotoPreview('','#business-note-photo-preview','#business-note-photo-preview-image');try{await firestoreReady();await firestoreCollection('business-notes').doc(note.id).set(firestoreClean(note));toast('Business note saved');}catch{toast('Note is saved on this device and will sync when online.');}},true);
+document.addEventListener('click',event=>{const view=event.target.closest('[data-view-business-note-photo]');if(view){$('#business-note-photo-full').src=view.dataset.viewBusinessNotePhoto;$('#business-note-photo-dialog').showModal();}if(event.target.closest('[data-close-business-note-photo]'))$('#business-note-photo-dialog').close();});
+render();
