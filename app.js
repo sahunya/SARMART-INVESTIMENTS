@@ -247,3 +247,27 @@ const setPaymentModeWithMoment=setPaymentMode;
 setPaymentMode=function(mode,record){const opening=!$('#payment-dialog').open;setPaymentModeWithMoment(mode,record);if(opening){$('#payment-date').value=today();$('#payment-time').value=new Date().toTimeString().slice(0,5);}};
 $('#payment-form').addEventListener('submit',()=>{const record=records.find(item=>item.id===$('#payment-record-id').value),date=$('#payment-date').value||today(),time=$('#payment-time').value||new Date().toTimeString().slice(0,5);if(!record)return;const note=noteEntries(record).at(-1);if(note){note.date=date;note.time=time;record.noteEntries=noteEntries(record);}const payment=paymentEntries(record).at(-1);if(payment){payment.date=date;payment.time=time;record.payments=paymentEntries(record);}save();sync('update',{record},true);},false);
 render();
+
+// Put the entry description first and the customer/supplier second wherever
+// a receivable or payable is shown.
+function entryHeading(record){return record.name||record.party||'Untitled entry';}
+function entryPerson(record){return record.party||record.name||'No contact';}
+const accountCardWithDescriptionFirst=accountCard;
+accountCard=function(record){let html=accountCardWithDescriptionFirst(record);const description=entryHeading(record),person=entryPerson(record);if(description!==person)html=html.replace(`<strong>${esc(person)}</strong>`,`<strong>${esc(description)}</strong>`);return html;};
+renderRecordSearch=function(){const target=$('#record-search-results'),query=$('#record-search-input').value.trim().toLowerCase();if(!query){target.innerHTML='<p class="record-search-empty">Type a supplier, customer, or description to find an entry.</p>';return;}const matches=records.filter(record=>canSearchEdit(record)&&`${record.party} ${record.name} ${record.category} ${record.notes} ${noteEntries(record).map(note=>note.text).join(' ')}`.toLowerCase().includes(query)).slice(0,60);target.innerHTML=matches.length?matches.map(record=>`<div class="record-search-result"><button type="button" class="record-search-open" data-open-search-record="${esc(record.id)}"><span><strong>${esc(entryHeading(record))}</strong><small>${esc(typeName(record.type))} · ${esc(record.type==='expense'?record.category||'Other':entryPerson(record))}</small></span><strong class="amount ${record.type}">${money.format(record.amount)}</strong></button><div class="record-search-actions">${actions(record)}</div></div>`).join(''):'<p class="record-search-empty">No matching entries found.</p>';};
+render();
+
+// Every screen uses the same amount: a cash-out's recorded value or the
+// remaining balance for a receivable/payable after payments and corrections.
+function amountShown(record){return record.type==='expense'?Number(record.amount||0):outstanding(record);}
+const renderDashboardWithMatchingAmounts=renderDashboard;
+renderDashboard=function(){renderDashboardWithMatchingAmounts();const recent=records.filter(record=>normalizeDate(record.date)===today()||normalizeDate(record.updatedAt)===today()).sort((a,b)=>String(activityTime(b)).localeCompare(String(activityTime(a))));$$('#recent-list .activity-row .amount').forEach((node,index)=>{const record=recent[index];if(record)node.textContent=money.format(amountShown(record));});};
+const renderRecordSearchWithMatchingAmounts=renderRecordSearch;
+renderRecordSearch=function(){renderRecordSearchWithMatchingAmounts();$$('#record-search-results [data-open-search-record]').forEach(button=>{const record=records.find(item=>item.id===button.dataset.openSearchRecord),amount=button.querySelector('.amount');if(record&&amount)amount.textContent=money.format(amountShown(record));});};
+render();
+
+// A search with no entry can immediately start a new customer contact.
+const renderRecordSearchWithNewCustomer=renderRecordSearch;
+renderRecordSearch=function(){renderRecordSearchWithNewCustomer();const target=$('#record-search-results'),name=$('#record-search-input').value.trim(),hasEntry=target.querySelector('[data-open-search-record]'),known=contacts.some(contact=>String(contact.name||'').trim().toLowerCase()===name.toLowerCase());if(name&&!hasEntry&&!known)target.innerHTML=`<p class="record-search-empty">No entry found for “${esc(name)}”.</p><button type="button" class="primary-btn compact" data-add-customer-from-search="${esc(name)}">+ Add ${esc(name)} as a new customer</button>`;};
+document.addEventListener('click',event=>{const button=event.target.closest('[data-add-customer-from-search]');if(!button)return;$('#record-search-dialog').close();$('#contact-form').reset();$('#contact-name').value=button.dataset.addCustomerFromSearch;$('#contact-type').value='customer';$('#contact-dialog').showModal();setTimeout(()=>$('#contact-phone').focus(),0);});
+render();
