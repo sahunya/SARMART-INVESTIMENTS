@@ -6,7 +6,7 @@ const categories=['Inventory / stock','Rent','Utilities','Phone & internet','Tra
 const readJson=(storage,key,fallback)=>{try{const value=JSON.parse(storage.getItem(key)||'null');return value??fallback;}catch{return fallback;}};
 let records=readJson(localStorage,storageKey,[]), contacts=readJson(localStorage,contactsKey,[]), outOfStock=readJson(localStorage,stockKey,[]), assistantLogins=readJson(localStorage,assistantLoginsKey,[]), reconciliation=readJson(localStorage,reconciliationKey,{}), currentUser=readJson(sessionStorage,sessionKey,null), pendingDeletes=new Set(readJson(localStorage,deletedKey,[])), pendingWrites=new Set(readJson(localStorage,pendingWritesKey,[])), pendingStockWrites=new Set(readJson(localStorage,stockPendingKey,[])), inFlightWrites=new Set(),syncQueueActive=false,notificationFeed=[],cashMode='out', undoHistory=[], redoHistory=[],newStockPhoto='',editStockPhoto='';
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-function applyAppearance(settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system'})){const fonts={system:'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',arial:'Arial,Helvetica,sans-serif',verdana:'Verdana,Geneva,sans-serif',serif:'Georgia,serif'},size=settings.size||'15px',font=fonts[settings.font]||fonts.system;document.documentElement.style.setProperty('--user-font-size',size);document.documentElement.style.setProperty('--user-font-family',font);document.body?.style.setProperty('font-size',size,'important');document.body?.style.setProperty('font-family',font,'important');}
+function applyAppearance(settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system',background:'light',mode:'light'})){const fonts={system:'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',arial:'Arial,Helvetica,sans-serif',verdana:'Verdana,Geneva,sans-serif',serif:'Georgia,serif',trebuchet:'"Trebuchet MS",Arial,sans-serif',tahoma:'Tahoma,Verdana,sans-serif',mono:'"Courier New",monospace'},size=settings.size||'15px',font=fonts[settings.font]||fonts.system,background=['light','inverted','warm'].includes(settings.background)?settings.background:'light',mode=settings.mode==='dark'?'dark':'light';document.documentElement.style.setProperty('--user-font-size',size);document.documentElement.style.setProperty('--user-font-family',font);document.body?.style.setProperty('font-size',size,'important');document.body?.style.setProperty('font-family',font,'important');document.body?.setAttribute('data-background-style',background);document.body?.setAttribute('data-colour-mode',mode);}
 document.addEventListener('click',event=>{if(event.target.closest('#stock-sign-out'))$('#sign-out').click();if(event.target.closest('#sign-out'))sessionStorage.removeItem(remoteSessionKey);});
 document.addEventListener('click',event=>{const edit=event.target.closest('[data-edit]'),remove=event.target.closest('[data-delete],[data-delete-imported]');if(remove&&currentUser?.role!=='admin'){event.preventDefault();event.stopImmediatePropagation();return;}if(edit&&currentUser?.role!=='admin'){const record=records.find(item=>item.id===edit.dataset.edit),role=String(currentUser?.role||''),normalAssistant=role==='assistant'||role.startsWith('assistant-');if(!normalAssistant||!record||record.type==='expense'){event.preventDefault();event.stopImmediatePropagation();}}},true);
 document.addEventListener('click',event=>{const button=event.target.closest('[data-payment]'),role=String(currentUser?.role||''),normalAssistant=role==='assistant'||role.startsWith('assistant-');if(!button||!normalAssistant)return;const record=records.find(item=>item.id===button.dataset.payment);if(!record)return;$('#payment-record-id').value=record.id;$('#payment-note').value='';setPaymentMode('payment',record);$('#payment-dialog').showModal();});
@@ -129,7 +129,7 @@ $$('.search-input,.filter-select').forEach(input=>input.addEventListener('input'
 $$('[data-delete-imported]').forEach(button=>button.addEventListener('click',async()=>{if(currentUser?.role!=='admin')return;const view=button.closest('.view')?.id||'',type=view==='receivables'?'receivable':'payable',tagged=records.filter(record=>record.type===type&&String(record.notes||'').toLowerCase().includes('imported')),targets=tagged.length?tagged:records.filter(record=>record.type===type);if(!targets.length){toast(`There are no ${type} entries to delete.`);return;}const message=tagged.length?`Delete all ${tagged.length} imported ${type} entries? This cannot be undone.`:`Older uploads were not tagged. Delete all ${targets.length} ${type} entries currently listed? This cannot be undone.`;if(!confirm(message))return;try{await googleRequest('deleteMany',{ids:targets.map(record=>record.id)});const ids=new Set(targets.map(record=>record.id));records=records.filter(record=>!ids.has(record.id));ids.forEach(id=>pendingDeletes.delete(id));save();pullAll(true);toast(`${targets.length} ${type} entries deleted everywhere`);}catch{toast('Could not delete from Google Sheet.');}}));
 $$('[data-template]').forEach(button=>button.addEventListener('click',()=>downloadTemplate(button.dataset.template)));
 $('#import-records').addEventListener('click',()=>{ $('#import-file').dataset.type=''; $('#import-file').click(); });$$('[data-import-type]').forEach(button=>button.addEventListener('click',()=>{ $('#import-file').dataset.type=button.dataset.importType; $('#import-file').click(); }));$('#import-file').addEventListener('change',event=>{const file=event.target.files[0];if(file)importRecords(file,event.target.dataset.type||'');event.target.value='';});
-$('#sign-out').addEventListener('click',()=>{sessionStorage.removeItem(sessionKey);currentUser=null;$('#login-form').reset();updateLogin();});$('#logout-other-devices').addEventListener('click',async()=>{if(currentUser?.role!=='admin'||!token())return toast('Connect Google Sheet before logging out other devices.');if(!confirm('Log out every other device signed in to this business?'))return;try{const session=await googleRequest('logoutOtherDevices');currentUser.sessionVersion=String(session.version);sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));toast('Other devices will be logged out shortly.');}catch{toast('Could not log out other devices. Check the Sheet connection.');}});$('#sheet-settings').addEventListener('click',()=>{$('#sheet-token').value=token();$('#sheet-error').textContent='';$('#sheet-dialog').showModal();});$('#sheet-form').addEventListener('submit',async e=>{e.preventDefault();localStorage.setItem(googleTokenKey,$('#sheet-token').value.trim());const result=await pullAll();if(result.ok){$('#sheet-dialog').close();verifyRemoteSession();toast('Google Sheet connected');}else $('#sheet-error').textContent=`Could not connect: ${result.message}`;});$('#appearance-settings').addEventListener('click',()=>{const settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system'});$('#appearance-size').value=settings.size||'15px';$('#appearance-font').value=settings.font||'system';$('#appearance-dialog').showModal();});$('#appearance-form').addEventListener('submit',event=>{event.preventDefault();const settings={size:$('#appearance-size').value,font:$('#appearance-font').value};localStorage.setItem(appearanceKey,JSON.stringify(settings));applyAppearance(settings);$('#appearance-dialog').close();toast('Text appearance saved');});
+$('#sign-out').addEventListener('click',()=>{sessionStorage.removeItem(sessionKey);currentUser=null;$('#login-form').reset();updateLogin();});$('#logout-other-devices').addEventListener('click',async()=>{if(currentUser?.role!=='admin'||!token())return toast('Connect Google Sheet before logging out other devices.');if(!confirm('Log out every other device signed in to this business?'))return;try{const session=await googleRequest('logoutOtherDevices');currentUser.sessionVersion=String(session.version);sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));toast('Other devices will be logged out shortly.');}catch{toast('Could not log out other devices. Check the Sheet connection.');}});$('#sheet-settings').addEventListener('click',()=>{$('#sheet-token').value=token();$('#sheet-error').textContent='';$('#sheet-dialog').showModal();});$('#sheet-form').addEventListener('submit',async e=>{e.preventDefault();localStorage.setItem(googleTokenKey,$('#sheet-token').value.trim());const result=await pullAll();if(result.ok){$('#sheet-dialog').close();verifyRemoteSession();toast('Google Sheet connected');}else $('#sheet-error').textContent=`Could not connect: ${result.message}`;});$('#appearance-settings').addEventListener('click',()=>{const settings=readJson(localStorage,appearanceKey,{size:'15px',font:'system',background:'light'});$('#appearance-size').value=settings.size||'15px';$('#appearance-font').value=settings.font||'system';$('#appearance-background').value=settings.background||'light';$('#appearance-dialog').showModal();});$('#appearance-form').addEventListener('submit',event=>{event.preventDefault();const settings={size:$('#appearance-size').value,font:$('#appearance-font').value,background:$('#appearance-background').value};localStorage.setItem(appearanceKey,JSON.stringify(settings));applyAppearance(settings);$('#appearance-dialog').close();toast('Appearance saved');});
 const compactNote=$('#record-notes'),noteWrap=document.createElement('div'),expandedNote=document.createElement('textarea'),noteToggle=document.createElement('button');noteWrap.className='note-input-wrap';expandedNote.id='record-notes';expandedNote.placeholder=compactNote.placeholder;expandedNote.rows=1;noteToggle.type='button';noteToggle.className='note-toggle';noteToggle.textContent='⌄';noteToggle.title='Show full note';noteToggle.addEventListener('click',()=>{const open=noteWrap.classList.toggle('expanded');noteToggle.textContent=open?'⌃':'⌄';noteToggle.title=open?'Hide full note':'Show full note';});compactNote.replaceWith(noteWrap);noteWrap.append(expandedNote,noteToggle);
 const colorLabel=document.createElement('label'),recordColor=document.createElement('input'),originalOpenRecord=openRecord;colorLabel.className='color-field';colorLabel.append('Highlight colour (optional)');recordColor.id='record-color';recordColor.type='color';recordColor.value='#ffffff';colorLabel.append(recordColor);$('#record-form .modal-actions').before(colorLabel);openRecord=(type,id='')=>{originalOpenRecord(type,id);const record=id?records.find(item=>item.id===id):null;$('#record-color').value=/^#[0-9a-f]{6}$/i.test(record?.color||'')?record.color:'#ffffff';if(record){$('#record-notes').value='';$('#record-notes').placeholder='Add another note (earlier notes stay saved)';}else $('#record-notes').placeholder='e.g. Sales for the day';};
 ['expense','receivable','payable'].forEach(type=>{const view=type==='expense'?'expenses':`${type}s`,bar=$(`#${view} .filter-bar`),from=document.createElement('input'),to=document.createElement('input');from.type=to.type='date';from.dataset.dateFrom=type;to.dataset.dateTo=type;from.title='From date';to.title='To date';from.setAttribute('aria-label','From date');to.setAttribute('aria-label','To date');from.addEventListener('input',render);to.addEventListener('input',render);bar.append(from,to);});
@@ -432,3 +432,136 @@ makeDashboardFoldable('.alerts-panel');makeDashboardFoldable('.stock-panel');mov
 const accountCardWithLatestAction=accountCard;
 accountCard=function(record){const html=accountCardWithLatestAction(record),latest=noteEntries(record).at(-1);if(!latest?.text)return html;const amount=signedNoteAmount(latest),amountText=amount===null?'':` · ${money.format(amount)}`,action=`<div class="account-last-action"><b>Last update:</b> ${esc(latest.text)}${amountText}</div>`;return html.replace('</div><div class="account-money">',`${action}</div><div class="account-money">`);};
 render();
+
+// A full entry edit replaces its previous note history. Individual note
+// pencils still change only their own note.
+let replaceNotesOnRecordEdit='';
+document.addEventListener('click',event=>{
+  const edit=event.target.closest('[data-edit]');
+  if(edit)replaceNotesOnRecordEdit=edit.dataset.edit||'';
+},true);
+document.addEventListener('submit',event=>{
+  if(event.target?.id!=='record-form')return;
+  const id=$('#record-id')?.value||'';
+  if(!id||id!==replaceNotesOnRecordEdit)return;
+  const replacement=$('#record-notes')?.value.trim()||'';
+  if(!replacement){
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    toast('Enter the new note before saving. It will replace the earlier notes.');
+    return;
+  }
+  const record=records.find(item=>item.id===id);
+  if(record){
+    const preserved=String(record.notes||'').split(' · ').filter(text=>/^Contact\s*:/i.test(text)||/^Imported from (simple )?upload$/i.test(text));
+    record.notes=preserved.join(' · ');
+    record.noteEntries=[];
+  }
+  replaceNotesOnRecordEdit='';
+},true);
+$('#record-dialog')?.addEventListener('close',()=>{replaceNotesOnRecordEdit='';});
+
+// Keep Search & edit open and refreshed after a save.
+let returnToSearchQuery='';
+document.addEventListener('click',event=>{
+  const edit=event.target.closest('[data-edit],[data-open-search-record]');
+  if(edit&&$('#record-search-dialog')?.open)returnToSearchQuery=$('#record-search-input')?.value||'';
+},true);
+$('#record-form')?.addEventListener('submit',()=>{
+  if(!returnToSearchQuery)return;
+  const query=returnToSearchQuery;
+  returnToSearchQuery='';
+  setTimeout(()=>{
+    const dialog=$('#record-search-dialog'),input=$('#record-search-input');
+    if(!dialog||!input)return;
+    input.value=query;
+    if(!dialog.open)dialog.showModal();
+    renderRecordSearch();
+  },0);
+});
+const renderWithLiveSearchResults=render;
+render=function(){
+  renderWithLiveSearchResults();
+  if($('#record-search-dialog')?.open)renderRecordSearch();
+};
+
+// Professional login controls: show/hide password and one protected sign-in
+// request at a time, so repeated phone taps cannot start duplicate logins.
+let loginInProgress=false;
+$('#toggle-login-password')?.addEventListener('click',()=>{
+  const input=$('#login-password'),show=input.type==='password';
+  input.type=show?'text':'password';
+  $('#toggle-login-password').setAttribute('aria-label',show?'Hide password':'Show password');
+  $('#toggle-login-password').textContent=show?'◉':'◌';
+});
+document.addEventListener('submit',async event=>{
+  if(event.target?.id!=='login-form')return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if(loginInProgress)return;
+  const username=$('#login-username').value.trim(),password=$('#login-password').value;
+  if(!username||!password)return;
+  const button=$('#login-form button[type="submit"]');
+  loginInProgress=true;
+  button.disabled=true;
+  button.classList.add('loading');
+  try{
+    const admin=loginAccounts().find(account=>username.toLowerCase()===account.username.toLowerCase()&&password===(localStorage.getItem(`sarmart-password-${account.role}`)||account.password));
+    if(admin){
+      sessionStorage.removeItem(remoteSessionKey);
+      currentUser={role:admin.role,label:admin.label,username:admin.username};
+      sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));
+    }else{
+      const remote=await remoteLogin(username,password),role=remote.role==='stock'?`stock-assistant-${remote.id}`:`assistant-${remote.id}`;
+      sessionStorage.setItem(remoteSessionKey,JSON.stringify(remote));
+      currentUser={role,label:remote.role==='stock'?'Stock Assistant':'Assistant',username:remote.username,sessionVersion:remote.sessionVersion};
+      sessionStorage.setItem(sessionKey,JSON.stringify(currentUser));
+    }
+    if($('#remember-login')?.checked)localStorage.setItem('sarmart-last-username',username);
+    else localStorage.removeItem('sarmart-last-username');
+    $('#login-error').textContent='';
+    updateLogin();
+  }catch(error){
+    $('#login-error').textContent=error.message||'Incorrect username or password.';
+  }finally{
+    loginInProgress=false;
+    button.disabled=false;
+    button.classList.remove('loading');
+  }
+},true);
+const rememberedUsername=localStorage.getItem('sarmart-last-username');
+if(rememberedUsername)$('#login-username').value=rememberedUsername;
+
+// Organise the drawer as a clear business menu, with the current role shown
+// safely and no public assistant details.
+const drawerIcons={Dashboard:'▦','Cash Flow':'↗',Receivable:'♙',Payable:'▣','Add entry':'⊕','Search & edit':'⌕',Contacts:'♧',Reports:'▥',Calculator:'▤','Business notes':'▤'};
+$$('.nav-link').forEach(button=>{
+  if(button.dataset.drawerIcon)return;
+  button.dataset.drawerIcon='true';
+  const label=button.textContent.trim(),icon=drawerIcons[label]||'•';
+  button.innerHTML=`<span class="drawer-nav-icon" aria-hidden="true">${icon}</span><span>${esc(label)}</span>`;
+});
+function refreshDrawerProfile(){
+  const isAdmin=currentUser?.role==='admin',name=$('#drawer-profile-name'),email=$('#drawer-profile-email');
+  if(!name||!email)return;
+  name.textContent=currentUser?.label||'Authorized user';
+  email.textContent=isAdmin?'sarma.inv1@gmail.com':(currentUser?.username||'Authorized user');
+}
+function decorateDrawerSettings(){
+  const controls=$('#account-controls');
+  if(!controls||controls.dataset.organised)return;
+  controls.dataset.organised='true';
+  const system=document.createElement('p');system.className='drawer-section-title';system.textContent='System & settings';
+  const account=document.createElement('p');account.className='drawer-section-title drawer-account-title';account.textContent='Account';
+  controls.prepend(system);
+  const signOut=$('#sign-out');
+  if(signOut)signOut.before(account);
+  const secure=document.createElement('div');secure.className='drawer-security';secure.innerHTML='<span>🛡</span><div><strong>Secure & protected</strong><small>Your data is private and protected.</small></div><b>🔒</b>';
+  controls.append(secure);
+  const version=document.createElement('small');version.className='drawer-version';version.textContent='App Version 1.0.0';
+  controls.append(version);
+}
+refreshDrawerProfile();
+decorateDrawerSettings();
+const updateLoginWithDrawerProfile=updateLogin;
+updateLogin=function(){updateLoginWithDrawerProfile();refreshDrawerProfile();};
